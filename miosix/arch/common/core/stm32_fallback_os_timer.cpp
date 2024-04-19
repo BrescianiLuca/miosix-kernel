@@ -44,9 +44,9 @@ void IRQosTimerInit() {
 
 void IRQosTimerSetInterrupt(long long ns) noexcept {
     // Convert nanoseconds to ticks
-    long long ticks = ns * SYSTICK_FREQUENCY / 1000000000; // Assuming 1 second = 1000000000 nanoseconds
+    // Use TimerConversion
     // Set the reload value
-    SysTick->LOAD = ticks;
+    //SysTick->LOAD = ticks;
 }
 
 void IRQosTimerSetTime(long long ns) noexcept {};
@@ -77,7 +77,9 @@ public:
 
     inline long long IRQgetTimeNs(){
         // Convert ticks to nanoseconds
-        return SysTick->VAL * 1000000000 / SYSTICK_FREQUENCY;
+        // Need to use TimeConversion class
+        //return SysTick->VAL * 1000000000 / SYSTICK_FREQUENCY;
+        return 0;
     }
 
     inline long long IRQgetIrqNs(){
@@ -86,8 +88,8 @@ public:
 
     void IRQsetTimeNs(long long ns){
         // Convert nanoseconds to ticks and set the reload value
-        long long ticks = ns * SYSTICK_FREQUENCY / 1000000000; // Assuming 1 second = 1000000000 nanoseconds
-        SysTick->LOAD = ticks;
+        // Use TimerConversion
+        //SysTick->LOAD = ticks;
     }   //in os_timer.h il timer viene fatto startare qua
 
     inline void IRQsetIrqTick(long long tick){}
