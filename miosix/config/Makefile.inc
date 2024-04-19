@@ -58,7 +58,7 @@
 #OPT_BOARD := stm32f769ni_discovery
 #OPT_BOARD := stm32f415vg_st25dvdiscovery
 #OPT_BOARD := efm32g222f128_generic
-#OPT_BOARD := stm32l053r8_nucleo
+OPT_BOARD := stm32l053r8_nucleo
 #OPT_BOARD := stm32f030r8_stm32f0discovery
 #OPT_BOARD := stm32f765ii_marco_ram_board
 #OPT_BOARD := rp2040_raspberry_pi_pico
@@ -70,9 +70,9 @@
 ## size and speed
 ##
 #OPT_OPTIMIZATION := -O0
-OPT_OPTIMIZATION := -O2
+#OPT_OPTIMIZATION := -O2
 #OPT_OPTIMIZATION := -O3
-#OPT_OPTIMIZATION := -Os
+OPT_OPTIMIZATION := -Os
 
 ##
 ## C++ Exception/rtti support disable flags.
@@ -3261,7 +3261,7 @@ else ifeq ($(ARCH),cortexM0plus_stm32l0)
     $(ARCH_INC)/interfaces-impl/portability.cpp              \
     $(ARCH_INC)/interfaces-impl/delays.cpp                   \
     arch/common/drivers/stm32_gpio.cpp                       \
-    arch/common/core/stm32_16bit_os_timer.cpp                \
+    arch/common/core/stm32_fallback_os_timer.cpp	     \
     arch/common/CMSIS/Device/ST/STM32L0xx/Source/Templates/system_stm32l0xx.c
 
 ##-----------------------------------------------------------------------------
