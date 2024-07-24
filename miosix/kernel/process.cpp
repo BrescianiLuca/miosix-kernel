@@ -46,6 +46,18 @@ using namespace std;
 
 #ifdef WITH_PROCESSES
 
+#ifdef __NO_EXCEPTIONS
+#error Processes require C++ exception support
+#endif //__NO_EXCEPTIONS
+
+#ifndef WITH_FILESYSTEM
+#error Processes require filesystem support
+#endif //WITH_FILESYSTEM
+
+#ifndef WITH_DEVFS
+#error Processes require devfs support
+#endif //WITH_DEVFS
+
 namespace miosix {
 
 /**
@@ -114,11 +126,13 @@ Processes& Processes::instance()
 // class Process
 //
 
-pid_t Process::create(const ElfProgram& program, ArgsBlock&& args)
+pid_t Process::create(ElfProgram&& program, ArgsBlock&& args)
 {
+    if(program.errorCode()) return program.errorCode();
     Processes& p=Processes::instance();
     ProcessBase *parent=Thread::getCurrentThread()->proc;
-    unique_ptr<Process> proc(new Process(parent->fileTable,program,std::move(args)));
+    unique_ptr<Process> proc(new Process(parent->fileTable,
+                                         std::move(program),std::move(args)));
     {   
         Lock<Mutex> l(p.procMutex);
         proc->pid=getNewPid();
@@ -126,7 +140,7 @@ pid_t Process::create(const ElfProgram& program, ArgsBlock&& args)
         parent->childs.push_back(proc.get());
         p.processes[proc->pid]=proc.get();
     }
-    auto thr=Thread::createUserspace(Process::start,nullptr,Thread::DEFAULT,proc.get());
+    auto thr=Thread::createUserspace(Process::start,proc.get());
     if(thr==nullptr)
     {
         Lock<Mutex> l(p.procMutex);
@@ -150,9 +164,8 @@ pid_t Process::spawn(const char *path, const char* const* argv,
 {
     ArgsBlock args(argv,envp,narg,nenv);
     if(args.valid()==false) return -E2BIG;
-    auto prog=lookup(path);
-    if(prog.second) return prog.second;
-    return Process::create(prog.first,std::move(args));
+    ElfProgram program(path);
+    return Process::create(std::move(program),std::move(args));
 }
 
 pid_t Process::spawn(const char *path, const char* const* argv,
@@ -227,64 +240,52 @@ pid_t Process::waitpid(pid_t pid, int* exit, int options)
 
 Process::~Process() {}
 
-Process::Process(const FileDescriptorTable& fdt, const ElfProgram& program,
+Process::Process(const FileDescriptorTable& fdt, ElfProgram&& program,
         ArgsBlock&& args) : ProcessBase(fdt), waitCount(0), zombie(false)
 {
     //This is required so that bad_alloc can never be thrown when the first
     //thread of the process will be stored in this vector
     threads.reserve(1);
-    load(program,std::move(args));
+    load(std::move(program),std::move(args));
 }
 
-void Process::load(const ElfProgram& program, ArgsBlock&& args)
+void Process::load(ElfProgram&& program, ArgsBlock&& args)
 {
-    this->program=program;
+    this->program=std::move(program);
     //Done here so if not enough memory the new process is not even created
     image.load(this->program);
+    //Do the final size check that could not be done when validating the elf
+    //file alone because the size of the args block was unknown.
+    //The args block is not considered part of the stack, so it pushes the main
+    //stack down and eats away from the heap. This check should only fail if
+    //the area reserved for the heap is so small that becomes negative
+    if(image.getDataBssSize()+WATERMARK_LEN+image.getMainStackSize()+args.size()
+        > image.getProcessImageSize()) throw runtime_error("Args block overflow");
     auto ptr=reinterpret_cast<char*>(image.getProcessBasePointer());
+    //iprintf("image    addr = %p size = %d\n",ptr,image.getProcessImageSize());
+    //iprintf("data/bss addr = %p size = %d\n",ptr,image.getDataBssSize());
+    //iprintf("stack    addr = %p size = %d\n",ptr+image.getProcessImageSize()
+    //    -args.size()-image.getMainStackSize()-WATERMARK_LEN,
+    //    image.getMainStackSize());
+    //iprintf("args     addr = %p size = %d\n",ptr+image.getProcessImageSize()
+    //    -args.size(),args.size());
     ptr+=image.getProcessImageSize()-args.size();
     args.relocateTo(ptr);
     argc=args.getNumberOfArguments();
     argvSp=ptr; //Argument array is at the start of the args block
     envp=ptr+args.getEnvIndex();
+    auto elfBase=reinterpret_cast<const unsigned int*>(this->program.getElfBase());
     unsigned int elfSize=this->program.getElfSize();
-    unsigned int roundedSize=elfSize;
-    if(elfSize<ProcessPool::blockSize) roundedSize=ProcessPool::blockSize;
-    roundedSize=MPUConfiguration::roundSizeForMPU(roundedSize);
-    //TODO: Till a flash file system that ensures proper alignment of the
-    //programs loaded in flash is implemented, make the whole flash visible as
-    //a big MPU region. This allows a program to read and execute parts of
-    //other programs but not to write anything.
-    extern unsigned char _elf_pool_start asm("_elf_pool_start");
-    extern unsigned char _elf_pool_end asm("_elf_pool_end");
-    unsigned int *start=reinterpret_cast<unsigned int*>(&_elf_pool_start);
-    unsigned int *end=reinterpret_cast<unsigned int*>(&_elf_pool_end);
-    unsigned int elfPoolSize=(end-start)*sizeof(int);
-    elfPoolSize=MPUConfiguration::roundSizeForMPU(elfPoolSize);
-    mpu=MPUConfiguration(start,elfPoolSize,
+    //XIP filesystems may store elf programs without the required alignment to
+    //support MPU operation, thus round up the elf region so it fits the minimum
+    //MPU-capable region. This makes it possible for a process in a XIP
+    //filesystem to access more than the elf itself, but since the access is
+    //read-only, memory protection is preserved. TODO: use ARM MPU sub-region
+    //disable feature to further limit region size
+    if(this->program.isCopiedInRam()==false)
+        tie(elfBase,elfSize)=MPUConfiguration::roundRegionForMPU(elfBase,elfSize);
+    mpu=MPUConfiguration(elfBase,elfSize,
             image.getProcessBasePointer(),image.getProcessImageSize());
-//    mpu=MPUConfiguration(this->program.getElfBase(),roundedSize,
-//            image.getProcessBasePointer(),image.getProcessImageSize());
-}
-
-pair<ElfProgram,int> Process::lookup(const char *path)
-{
-    if(path==nullptr || path[0]=='\0') return make_pair(ElfProgram(),-EFAULT);
-    //TODO: expand ./program using cwd of correct file descriptor table
-    string filePath=path;
-    ResolvedPath openData=FilesystemManager::instance().resolvePath(filePath);
-    if(openData.result<0) return make_pair(ElfProgram(),-ENOENT);
-    StringPart relativePath(filePath,string::npos,openData.off);
-    intrusive_ref_ptr<FileBase> file;
-    if(int res=openData.fs->open(file,relativePath,O_RDONLY,0)<0)
-        return make_pair(ElfProgram(),res);
-    MemoryMappedFile mmFile=file->getFileFromMemory();
-    if(mmFile.isValid()==false) return make_pair(ElfProgram(),-EFAULT);
-    if(reinterpret_cast<unsigned int>(mmFile.data) & 0x3)
-        return make_pair(ElfProgram(),-ENOEXEC);
-    ElfProgram prog(reinterpret_cast<const unsigned int*>(mmFile.data),mmFile.size);
-    if(prog.isValid()==false) return make_pair(ElfProgram(),-EINVAL);
-    return make_pair(std::move(prog),0);
 }
 
 void *Process::start(void *)
@@ -295,7 +296,7 @@ void *Process::start(void *)
     do {
         unsigned int entry=proc->program.getEntryPoint();
         Thread::setupUserspaceContext(entry,proc->argc,proc->argvSp,proc->envp,
-            proc->image.getProcessBasePointer());
+            proc->image.getProcessBasePointer(),proc->image.getMainStackSize());
         SvcResult svcResult=Resume;
         do {
             miosix_private::SyscallParameters sp=Thread::switchToUserspace();
@@ -343,7 +344,7 @@ void *Process::start(void *)
             p.genericWaiting.broadcast();
         }
     }
-    return 0;
+    return nullptr;
 }
 
 Process::SvcResult Process::handleSvc(miosix_private::SyscallParameters sp)
@@ -492,8 +493,9 @@ Process::SvcResult Process::handleSvc(miosix_private::SyscallParameters sp)
                 if(mpu.withinForWriting(buf,size))
                 {
                     int result=fileTable.getcwd(buf,size);
-                    sp.setParameter(0,result);
-                } else sp.setParameter(0,-EFAULT);
+                    // Do not overwrite r0 on purpose to preserve the pointer
+                    sp.setParameter(1,result);
+                } else sp.setParameter(1,-EFAULT);
                 break;
             }
 
@@ -584,6 +586,28 @@ Process::SvcResult Process::handleSvc(miosix_private::SyscallParameters sp)
                     int result=fileTable.readlink(path,buf,size);
                     sp.setParameter(0,result);
                 } else sp.setParameter(0,-EFAULT);
+                break;
+            }
+
+            case Syscall::TRUNCATE:
+            {
+                auto path=reinterpret_cast<const char*>(sp.getParameter(0));
+                off_t size=sp.getParameter(2);
+                size|=static_cast<off_t>(sp.getParameter(1))<<32;
+                if(mpu.withinForReading(path))
+                {
+                    int result=fileTable.truncate(path,size);
+                    sp.setParameter(0,result);
+                } else sp.setParameter(0,-EFAULT);
+                break;
+            }
+
+            case Syscall::FTRUNCATE:
+            {
+                off_t size=sp.getParameter(2);
+                size|=static_cast<off_t>(sp.getParameter(1))<<32;
+                int result=fileTable.ftruncate(sp.getParameter(0),size);
+                sp.setParameter(0,result);
                 break;
             }
 
@@ -724,13 +748,13 @@ Process::SvcResult Process::handleSvc(miosix_private::SyscallParameters sp)
                     ArgsBlock args(argv,envp,narg,nenv);
                     if(args.valid())
                     {
-                        auto prog=lookup(path);
-                        if(prog.second==0)
+                        ElfProgram program(path);
+                        if(program.errorCode()==0)
                         {
                             try {
                                 //TODO: when threads within processes are
                                 //implemented, kill all other threads
-                                load(prog.first,std::move(args));
+                                load(std::move(program),std::move(args));
                             } catch(exception& e) {
                                 //TODO currently load causes the old process
                                 //ram to be deallocated before allocating the
@@ -743,7 +767,7 @@ Process::SvcResult Process::handleSvc(miosix_private::SyscallParameters sp)
                                 return Segfault;
                             }
                             return Execve;
-                        } else sp.setParameter(0,prog.second);
+                        } else sp.setParameter(0,program.errorCode());
                     } else sp.setParameter(0,-E2BIG);
                 } else sp.setParameter(0,-EFAULT);
                 break;
@@ -757,13 +781,13 @@ Process::SvcResult Process::handleSvc(miosix_private::SyscallParameters sp)
                 auto envp=reinterpret_cast<char* const*>(sp.getParameter(3));
                 int narg=validateStringArray(mpu,argv);
                 int nenv=validateStringArray(mpu,envp);
-                if(mpu.withinForWriting(pidp,sizeof(pid_t)) &&
+                if((!pidp || mpu.withinForWriting(pidp,sizeof(pid_t))) &&
                    mpu.withinForReading(path) && narg>=0 && nenv>=0)
                 {
                     auto pid=Process::spawn(path,argv,envp,narg,nenv);
                     if(pid>=0)
                     {
-                        *pidp=pid;
+                        if(pidp) *pidp=pid;
                         sp.setParameter(0,0);
                     } else sp.setParameter(0,-pid); //NOTE: positive error codes
                 } else sp.setParameter(0,EFAULT); //NOTE: positive error codes
@@ -898,22 +922,24 @@ ArgsBlock::ArgsBlock(const char* const* argv, const char* const* envp, int narg,
     if(narg>maxArg || nenv>maxArg || argBlockSize>maxArgsBlockSize) return;
     blockSize=argBlockSize;
 
-    //The args block is essentially the first stack frame, and as such it
+    //Although the args block is is not considered part of the stack, it
     //defines the initial stack pointer value when the process starts.
     //As such, its size must be aligned to the platform-defined alignment
     unsigned int blockSizeBeforeAlign=blockSize;
     blockSize+=CTXSAVE_STACK_ALIGNMENT-1;
     blockSize/=CTXSAVE_STACK_ALIGNMENT;
     blockSize*=CTXSAVE_STACK_ALIGNMENT;
+    //May exceed max size because of alignment
+    if(blockSize>maxArgsBlockSize) return;
 
     block=new char[blockSize];
-    //Zero the adding introduced for alignment
+    //Zero the padding introduced for alignment
     memset(block+blockSizeBeforeAlign,0,blockSize-blockSizeBeforeAlign);
 
     envArrayIndex=sizeof(char*)*(narg+1);
     char **arrayBlock=reinterpret_cast<char**>(block);
     char *stringBlock=block+arrayBlockSize;
-    //NOTE: even though not strictly required, also arg array ends with nullptr
+    //NOTE: also arg array ends with nullptr
     auto add=[&](const char* const* a, int n)
     {
         for(int i=0;i<n;i++)

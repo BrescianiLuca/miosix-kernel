@@ -1,5 +1,5 @@
 /***************************************************************************
- *   Copyright (C) 2010, 2011, 2012, 2013, 2014 by Terraneo Federico       *
+ *   Copyright (C) 2010 - 2024 by Terraneo Federico                        *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -25,8 +25,7 @@
  *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
  ***************************************************************************/
 
-#ifndef INTERRUPTS_H
-#define	INTERRUPTS_H
+#pragma once
 
 /**
  * Called when an unexpected interrupt occurs.
@@ -34,25 +33,30 @@
  */
 void unexpectedInterrupt();
 
+namespace fault {
 /**
  * Possible kind of faults that the Cortex-M3 can report.
- * They are used to print debug information if a process causes a fault
+ * They are used to print debug information if a process causes a fault.
+ * This is a regular enum enclosed in a namespace instead of an enum class
+ * as due to the need to loosely couple fault types for different architectures
+ * the arch-independent code uses int to store generic fault types.
  */
 enum FaultType
 {
-    MP=1,          //Process attempted data access outside its memory
-    MP_NOADDR=2,   //Process attempted data access outside its memory (missing addr)
-    MP_XN=3,       //Process attempted code access outside its memory
-    UF_DIVZERO=4,  //Process attempted to divide by zero
-    UF_UNALIGNED=5,//Process attempted unaligned memory access
-    UF_COPROC=6,   //Process attempted a coprocessor access
-    UF_EXCRET=7,   //Process attempted an exception return
-    UF_EPSR=8,     //Process attempted to access the EPSR
-    UF_UNDEF=9,    //Process attempted to execute an invalid instruction
-    UF_UNEXP=10,   //Unexpected usage fault
-    HARDFAULT=11,  //Hardfault (for example process executed a BKPT instruction)
-    BF=12,         //Busfault
-    BF_NOADDR=13   //Busfault (missing addr)
+    MP=1,            //Process attempted data access outside its memory
+    MP_NOADDR=2,     //Process attempted data access outside its memory (missing addr)
+    MP_XN=3,         //Process attempted code access outside its memory
+    UF_DIVZERO=4,    //Process attempted to divide by zero
+    UF_UNALIGNED=5,  //Process attempted unaligned memory access
+    UF_COPROC=6,     //Process attempted a coprocessor access
+    UF_EXCRET=7,     //Process attempted an exception return
+    UF_EPSR=8,       //Process attempted to access the EPSR
+    UF_UNDEF=9,      //Process attempted to execute an invalid instruction
+    UF_UNEXP=10,     //Unexpected usage fault
+    HARDFAULT=11,    //Hardfault (for example process executed a BKPT instruction)
+    BF=12,           //Busfault
+    BF_NOADDR=13,    //Busfault (missing addr)
+    STACKOVERFLOW=14 //Stack overflow
 };
 
-#endif	//INTERRUPTS_H
+} //namespace proc

@@ -37,16 +37,12 @@
 #include <stdexcept>
 #include <algorithm>
 #include <vector>
-#include <set>
 #include <cassert>
 #include <functional>
-#include <fcntl.h>
-#include <sys/stat.h>
 #include <sys/wait.h>
 #include <signal.h>
 #include <pthread.h>
-#include <errno.h>
-#include <dirent.h>
+#include <cerrno>
 #include <ext/atomicity.h>
 #include <thread>
 #include <mutex>
@@ -54,6 +50,7 @@
 #include <future>
 #include <chrono>
 #include <atomic>
+#include <spawn.h>
 
 #include "miosix.h"
 #include "config/miosix_settings.h"
@@ -63,16 +60,6 @@
 #include "kernel/intrusive.h"
 #include "util/crc16.h"
 
-#ifdef WITH_PROCESSES
-#include "kernel/elf_program.h"
-#include "kernel/process.h"
-#include "kernel/process_pool.h"
-
-#include "syscall_testsuite/includes.h"
-#include "elf_testsuite/includes.h"
-#include "mpu_testsuite/includes.h"
-#endif //WITH_PROCESSES
-
 #if defined(_ARCH_CORTEXM7_STM32F7) || defined(_ARCH_CORTEXM7_STM32H7)
 #include <kernel/scheduler/scheduler.h>
 #include <core/cache_cortexMx.h>
@@ -80,6 +67,9 @@
 
 #include <ctime>
 static_assert(sizeof(time_t)==8,"time_t is not 64 bit");
+
+// Kercalls tests (shared with syscalls)
+#include "test_syscalls.h"
 
 using namespace std;
 using namespace miosix;
@@ -133,14 +123,9 @@ static void test_27();
 #if defined(_ARCH_CORTEXM7_STM32F7) || defined(_ARCH_CORTEXM7_STM32H7)
 void testCacheAndDMA();
 #endif //_ARCH_CORTEXM7_STM32F7/H7
-//Filesystem test functions
-#ifdef WITH_FILESYSTEM
-static void fs_test_1();
-static void fs_test_2();
-static void fs_test_3();
-static void fs_test_4();
-static void fs_test_5();
-#endif //WITH_FILESYSTEM
+#ifdef WITH_PROCESSES
+void test_syscalls_process();
+#endif //WITH_PROCESSES
 //Benchmark functions
 static void benchmark_1();
 static void benchmark_2();
@@ -150,35 +135,6 @@ static void benchmark_4();
 #ifndef __NO_EXCEPTIONS
 static void exception_test();
 #endif //__NO_EXCEPTIONS
-
-#ifdef WITH_PROCESSES
-void syscall_test_sleep();
-void process_test_process_ret();
-#ifdef WITH_FILESYSTEM
-void syscall_test_files();
-void process_test_file_concurrency();
-void syscall_test_mpu_open();
-void syscall_test_mpu_read();
-void syscall_test_mpu_write();
-#endif //WITH_FILESYSTEM
-
-unsigned int* memAllocation(unsigned int size);
-bool memCheck(unsigned int *base, unsigned int size);
-void runElfTest(const char *name, const unsigned char *filename, unsigned int file_length);
-
-int runProgram(const unsigned char *filename, unsigned int file_length);
-bool isSignaled(int exit_code);
-void mpuTest1();
-void mpuTest2();
-void mpuTest3();
-void mpuTest4();
-void mpuTest5();
-void mpuTest6();
-void mpuTest7();
-void mpuTest8();
-void mpuTest9();
-void mpuTest10();
-#endif //WITH_PROCESSES
 
 
 //main(), calls all tests
@@ -191,12 +147,10 @@ int main()
     {
         iprintf("Type:\n"
                 " 't' for kernel test\n"
-                " 'f' for filesystem test\n"
+                " 'k' for kercall test (includes filesystem)\n"
+                " 'p' for syscall/processes test\n"
                 " 'x' for exception test\n"
                 " 'b' for benchmarks\n"
-                " 'p' for process test\n"
-                " 'y' for syscall test\n"
-                " 'm' for elf and mpu test\n"
                 " 's' for shutdown\n");
         char c;
         for(;;)
@@ -246,20 +200,15 @@ int main()
                 iprintf("\n*** All tests were successful\n\n");
                 //} //Testing
                 break;
-            case 'f':
-                ledOn();
-                #ifdef WITH_FILESYSTEM
-                fs_test_1();
-                fs_test_2();
-                fs_test_3();
-                fs_test_4();
-                fs_test_5();
-                #else //WITH_FILESYSTEM
-                iprintf("Error, filesystem support is disabled\n");
-                #endif //WITH_FILESYSTEM
-                ledOff();
-                Thread::sleep(500);//Ensure all threads are deleted.
-                iprintf("\n*** All tests were successful\n\n");
+            case 'k':
+                test_syscalls(); //Actually kercalls
+                break;
+            case 'p':
+                #ifdef WITH_PROCESSES
+                test_syscalls_process();
+                #else // WITH_PROCESSES
+                iprintf("Error, process support is disabled\n");
+                #endif // WITH_PROCESSES
                 break;
             case 'x':
                 #ifndef __NO_EXCEPTIONS
@@ -278,90 +227,6 @@ int main()
                 ledOff();
                 Thread::sleep(500);//Ensure all threads are deleted.
                 break;
-            case 'p':
-                #ifdef WITH_PROCESSES
-                ledOn();
-                process_test_process_ret();
-                process_test_file_concurrency();
-                ledOff();
-                #else //#ifdef WITH_PROCESSES
-                iprintf("Error, process support is disabled\n");
-                #endif //#ifdef WITH_PROCESSES
-                break;
-            case 'y':
-                ledOn();
-                #ifdef WITH_PROCESSES
-                #ifdef WITH_FILESYSTEM
-                syscall_test_files();
-                syscall_test_mpu_open();
-                syscall_test_mpu_read();
-                syscall_test_mpu_write();
-                #else //WITH_FILESYSTEM
-                iprintf("Error, filesystem support is disabled\n");
-                #endif //WITH_FILESYSTEM
-
-                syscall_test_sleep();
-                #else //WITH_PROCESSES
-                iprintf("Error, process support is disabled\n");
-                #endif //WITH_PROCESSES
-                ledOff();
-                break;
-            case 'm':
-            {
-                //The priority of the test thread must be 1
-                Thread::setPriority(1);
-                ledOn();
-                #ifdef WITH_PROCESSES
-                //Note by TFT: these addresses are only valid for the stm3220g-eval.
-                //FIXME: look into it
-                // ProcessPool allocates 4096 bytes starting from address 0x64100000
-                // Range : 0x64100000 - 0x64101000
-
-                // First process memory layout
-                // Code region : 0x64101000 - 0x64101400
-                // Data region : 0x64104000 - 0x64108000
-
-                // Second process memory layout
-                // Code region : 0x64101400 - 0x64101800
-                // Data region : 0x64108000 - 0x6410c000
-
-                // Third process memory layout
-                // Code region : 0x64101800 - 0x64101c00
-                // Data region : 0x6410c000 - 0x64110000
-
-                //Altered elfs tests
-                iprintf("\nExecuting ELF tests.\n");
-                iprintf("--------------------\n");
-                runElfTest("Elf Test1", aelf1, aelf1_len);
-                runElfTest("Elf Test2", aelf2, aelf2_len);
-                runElfTest("Elf Test3", aelf3, aelf3_len);
-                runElfTest("Elf Test4", aelf4, aelf4_len);
-                runElfTest("Elf Test5", aelf5, aelf5_len);
-                runElfTest("Elf Test6", aelf6, aelf6_len);
-                runElfTest("Elf Test7", aelf7, aelf7_len);
-
-                //Mpu tests
-                iprintf("\n\nExecuting MPU tests.\n");
-                iprintf("---------------------\n");
-                unsigned int *m = memAllocation(4096);
-                mpuTest1();
-                mpuTest2();
-                mpuTest3();
-                mpuTest4();
-                mpuTest5();
-                mpuTest6();
-                mpuTest7();
-                mpuTest8();
-                mpuTest9();
-                mpuTest10();
-                ProcessPool::instance().deallocate(m);
-                #else //#ifdef WITH_PROCESSES
-                iprintf("Error, process support is disabled\n");
-                #endif //#ifdef WITH_PROCESSES
-                ledOff();
-                Thread::setPriority(0);
-                break;
-            }
             case 's':
                 iprintf("Shutting down\n");
                 shutdown();
@@ -401,169 +266,6 @@ static void fail(const char *cause)
     write(STDOUT_FILENO,"\n",1);
     reboot();
 }
-
-#ifdef WITH_PROCESSES
-
-void process_test_file_concurrency()
-{
-    test_name("Process file concurrency");
-
-    remove("/file1.bin");
-    remove("/file2.bin");
-
-    ElfProgram prog1(reinterpret_cast<const unsigned int*>(testsuite_file1_elf), testsuite_file1_elf_len);
-    ElfProgram prog2(reinterpret_cast<const unsigned int*>(testsuite_file2_elf), testsuite_file2_elf_len);
-
-    pid_t p1 = Process::create(prog1);
-    pid_t p2 = Process::create(prog2);
-
-    int res1 = 0, res2 = 0;
-
-    Process::waitpid(p1, &res1, 0);
-    Process::waitpid(p2, &res2, 0);
-
-    FILE *f1 = fopen("/file1.bin", "rb");
-    FILE *f2 = fopen("/file2.bin", "rb");
-
-    if(!f1) fail("Unable to open first file");
-    if(!f2) fail("Unable to open second file");
-
-    char buffer[10];
-
-    for(int i = 0; i < 1000; i++)
-    {
-        fread(buffer, 1, 9, f1);
-        if(strncmp(buffer, "file1.bin", 9) != 0) fail("Wrong data from file 1");
-    }
-
-    for(int i = 0; i < 1000; i++)
-    {
-        fread(buffer, 1, 9, f2);
-        if(strncmp(buffer, "file2.bin", 9) != 0) fail("Wrong data from file 2");
-    }
-
-    fclose(f1);
-    fclose(f2);
-
-    pass();
-}
-
-void process_test_process_ret()
-{
-    test_name("Process return value");
-    ElfProgram prog(reinterpret_cast<const unsigned int*>(testsuite_simple_elf),testsuite_simple_elf_len);
-    int ret = 0;
-    pid_t p = Process::create(prog);
-    Process::waitpid(p, &ret, 0);
-    //iprintf("Returned value is %d\n", WEXITSTATUS(ret));
-    if(WEXITSTATUS(ret) != 42) fail("Wrong returned value");
-    pass();
-}
-
-void syscall_test_mpu_open()
-{
-    test_name("open and MPU");
-    ElfProgram prog(reinterpret_cast<const unsigned int*>(testsuite_syscall_mpu_open_elf), testsuite_syscall_mpu_open_elf_len);
-    int ret = 0;
-    pid_t p = Process::create(prog);
-    Process::waitpid(p, &ret, 0);
-    //iprintf("Returned value is %d\n", ret);
-    if(WTERMSIG(ret) != SIGSYS) fail("0x00000000 is not a valid address!");
-    pass();
-}
-
-void syscall_test_mpu_read()
-{
-    test_name("read calls and MPU");
-    ElfProgram prog(reinterpret_cast<const unsigned int*>(testsuite_syscall_mpu_read_elf), testsuite_syscall_mpu_read_elf_len);
-    int ret = 0;
-    pid_t p = Process::create(prog);
-    Process::waitpid(p, &ret, 0);
-    //iprintf("Returned value is %d\n", ret);
-    if(WTERMSIG(ret) != SIGSYS) fail("0x00000000 is not a valid address!");
-    pass();
-}
-
-void syscall_test_mpu_write()
-{
-    test_name("write and MPU");
-    ElfProgram prog(reinterpret_cast<const unsigned int*>(testsuite_syscall_mpu_write_elf), testsuite_syscall_mpu_write_elf_len);
-    int ret = 0;
-    pid_t p = Process::create(prog);
-    Process::waitpid(p, &ret, 0);
-    iprintf("Returned value is %d\n", ret);
-    if(WTERMSIG(ret) != SIGSYS) fail("0x00000000 is not a valid address!");
-    pass();
-}
-
-void syscall_test_sleep()
-{
-	test_name("System Call: sleep");
-	ElfProgram prog(reinterpret_cast<const unsigned int*>(testsuite_sleep_elf),testsuite_sleep_elf_len);
-	int ret = 0;
-	long long time = getTime();
-	pid_t p = Process::create(prog);
-	Process::waitpid(p, &ret, 0);
-	long long err = llabs((getTime()-time-5000000000ll)/1000000);
-	if(err>10) fail("The sleep should have only a little more than 5 seconds.");
-	pass();
-}
-
-void syscall_test_files()
-{
-	test_name("System Call: open, read, write, seek, close, system");
-	
-	ElfProgram prog(reinterpret_cast<const unsigned int*>(testsuite_syscall_elf),testsuite_syscall_elf_len);
-	int ret = 0;
-	
-	remove("/foo.bin");
-	
-	pid_t child = Process::create(prog);
-	Process::waitpid(child, &ret, 0);
-	
-	iprintf("Returned value %d\n", WEXITSTATUS(ret));
-	switch(WEXITSTATUS(ret))
-    {
-		case 0:
-			pass();
-			break;
-		case 1:
-			fail("Open with O_RDWR should have failed, the file doesn't exist");
-			break;
-		case 2:
-			fail("Cannot craete new file");
-			break;
-		case 3:
-			fail("file descriptor not valid");
-			break;
-		case 4:
-			fail("write has written the wrong amount of data");
-			break;
-		case 5:
-			fail("read has read the wrong amount of data");
-			break;
-		case 6:
-			fail("readed data doesn't match the written one");
-			break;
-		case 7:
-			fail("close hasn't returned 0");
-			break;
-		case 8:
-			fail("open with O_RDWR failed, but the file exists");
-			break;
-		case 9:
-			fail("read has return the wrogn amount of data");
-			break;
-		case 10:
-			fail("readed data doesn't match the written one");
-			break;
-		case 11:
-			fail("close hasn't returned 0");
-			break;
-	}
-}
-
-#endif //WITH_PROCESSES
 
 //
 // Test 1
@@ -829,6 +531,7 @@ static void test_3()
     //Testing Thread::sleep() again
     t3_v2=false;
     p=Thread::create(t3_p2,STACK_SMALL,0,NULL,Thread::JOINABLE);
+    if(!p) fail("thread creation (1)");
     //t3_p2 sleeps for 15ms, then sets t3_v2. We sleep for 20ms so t3_v2 should
     //be true
     Thread::sleep(20);
@@ -845,6 +548,7 @@ static void test_3()
     //Creating another instance of t3_p2 to check what happens when 3 threads
     //are sleeping
     Thread *p2=Thread::create(t3_p2,STACK_SMALL,0,NULL,Thread::JOINABLE);
+    if(!p2) fail("thread creation (2)");
     //p will wake @ t=45, main will wake @ t=47 and p2 @ t=50ms
     //this will test proper sorting of sleeping_list in the kernel
     Thread::sleep(12);
@@ -858,7 +562,7 @@ static void test_3()
     t3_deleted=false;
     p2->terminate();
     p2->join();
-    if(Thread::exists(p)) fail("multiple instances (3)");
+    if(Thread::exists(p2)) fail("multiple instances (3)");
     if(t3_deleted==false) fail("multiple instances (4)");
     //Testing Thread::nanoSleepUntil()
     long long time;
@@ -1337,13 +1041,16 @@ static void test_6()
     seq.clear();
     #ifndef SCHED_TYPE_CONTROL_BASED
     //Create first thread
-    Thread::create(t6_p1,STACK_SMALL,priorityAdapter(0),NULL);
+    if (!Thread::create(t6_p1,STACK_SMALL,priorityAdapter(0),NULL))
+        fail("thread creation (1)");
     Thread::sleep(20);
     //Create second thread
-    Thread::create(t6_p2,STACK_SMALL,priorityAdapter(1),NULL);
+    if (!Thread::create(t6_p2,STACK_SMALL,priorityAdapter(1),NULL))
+        fail("thread creation (2)");
     Thread::sleep(20);
     //Create third thread
-    Thread::create(t6_p3,STACK_SMALL,priorityAdapter(2),NULL);
+    if (!Thread::create(t6_p3,STACK_SMALL,priorityAdapter(2),NULL))
+        fail("thread creation (3)");
     Thread::sleep(20);
     t6_m1.lock();
     /*
@@ -2087,27 +1794,33 @@ void test_14()
 
     //Test 1: detached thread that returns void*
     Thread *t=Thread::create(t14_p1,STACK_SMALL,0,0);
+    if(!t) fail("thread creation (1)");
     t->terminate();
     Thread::sleep(10);
     if(Thread::exists(t)) fail("detached thread");
     //Test 2: joining a not deleted thread
     t=Thread::create(t14_p2,STACK_SMALL,0,0,Thread::JOINABLE);
+    if(!t) fail("thread creation (2)");
     t->join();
     Thread::sleep(10);
     //Test 3: detaching a thread while not deleted
     t=Thread::create(t14_p2,STACK_SMALL,0,0,Thread::JOINABLE);
+    if(!t) fail("thread creation (3)");
     Thread::yield();
     t->detach();
     Thread::sleep(10);
     //Test 4: detaching a deleted thread
     t=Thread::create(t14_p1,STACK_SMALL,0,0,Thread::JOINABLE);
+    if(!t) fail("thread creation (4)");
     t->terminate();
     Thread::sleep(10);
     t->detach();
     Thread::sleep(10);
     //Test 5: detaching a thread on which some other thread called join
     t=Thread::create(t14_p2,STACK_SMALL,0,0,Thread::JOINABLE);
-    Thread::create(t14_p3,STACK_SMALL,0,reinterpret_cast<void*>(t));
+    if(!t) fail("thread creation (5)");
+    if(!Thread::create(t14_p3,STACK_SMALL,0,reinterpret_cast<void*>(t)))
+        fail("thread creation (6)");
     if(t->join()==true) fail("thread not detached (1)");
 
     //
@@ -2118,6 +1831,7 @@ void test_14()
     //Test 1: join on joinable, not already deleted
     void *result=0;
     t=Thread::create(t14_p2,STACK_SMALL,0,(void*)0xdeadbeef,Thread::JOINABLE);
+    if(!t) fail("thread creation (7)");
     Thread::yield();
     if(t->join(&result)==false) fail("Thread::join (1)");
     if(Thread::exists(t)) fail("Therad::exists (1)");
@@ -2126,6 +1840,7 @@ void test_14()
 
     //Test 2: join on joinable, but detach called before
     t=Thread::create(t14_p2,STACK_SMALL,0,0,Thread::JOINABLE);
+    if(!t) fail("thread creation (8)");
     Thread::yield();
     t->detach();
     if(t->join()==true) fail("Thread::join (2)");
@@ -2133,6 +1848,7 @@ void test_14()
 
     //Test 3: join on joinable, but detach called after
     t=Thread::create(t14_p1,STACK_SMALL,0,0,Thread::JOINABLE);
+    if(!t) fail("thread creation (9)");
     Thread::create(t14_p3,STACK_SMALL,0,reinterpret_cast<void*>(t));
     if(t->join()==true) fail("Thread::join (3)");
     t->terminate();
@@ -2140,6 +1856,7 @@ void test_14()
 
     //Test 4: join on detached, not already deleted
     t=Thread::create(t14_p1,STACK_SMALL,0,0);
+    if(!t) fail("thread creation (9)");
     if(t->join()==true) fail("Thread::join (4)");
     t->terminate();
     Thread::sleep(10);
@@ -2151,6 +1868,7 @@ void test_14()
     //Test 6: join on already deleted
     result=0;
     t=Thread::create(t14_p1,STACK_SMALL,0,(void*)0xdeadbeef,Thread::JOINABLE);
+    if(!t) fail("thread creation (10)");
     t->terminate();
     Thread::sleep(10);
     if(Thread::exists(t)==false) fail("Therad::exists (2)");
@@ -2161,6 +1879,7 @@ void test_14()
 
     //Test 7: join on already detached and deleted
     t=Thread::create(t14_p1,STACK_SMALL,0,0,Thread::JOINABLE);
+    if(!t) fail("thread creation (11)");
     t->detach();
     t->terminate();
     Thread::sleep(10);
@@ -2264,6 +1983,12 @@ static void test_15()
         fail("Threads not deleted (2)");
 
     //testing timedWait
+    long long timeout1=200000;
+    long long timeout2=500000;
+    #ifdef WITH_RTC_AS_OS_TIMER
+    timeout1+=200000;
+    timeout2+=250000;
+    #endif
     long long b,a=getTime()+10000000; //10ms
     {
         Lock<Mutex> l(t15_m1);
@@ -2271,7 +1996,7 @@ static void test_15()
         b=getTime();
     }
     //iprintf("delta=%lld\n",b-a);
-    if(llabs(b-a)>200000) fail("timedwait (2)");
+    if(llabs(b-a)>timeout1) fail("timedwait (2)");
     Thread::create(t15_p3,STACK_SMALL,0);
     a=getTime()+100000000; //100ms
     {
@@ -2279,8 +2004,8 @@ static void test_15()
         if(t15_c1.timedWait(l,a)!=TimedWaitResult::NoTimeout) fail("timedwait (1)");
         b=getTime();
     }
-    //iprintf("delta=%lld\n",b-a);
-    if(llabs(b-a+70000000)>500000) fail("timedwait (4)");
+    //iprintf("delta=%lld\n",b-a+70000000);
+    if(llabs(b-a+70000000)>timeout2) fail("timedwait (4)");
     Thread::sleep(10);
     pass();
 }
@@ -2572,6 +2297,12 @@ static void test_16()
     Thread::sleep(10);
     if(pthread_cond_destroy(&t16_c2)!=0) fail("cond destroy");
     //testing pthread_cond_timedwait
+    long long timeout1=200000;
+    long long timeout2=500000;
+    #ifdef WITH_RTC_AS_OS_TIMER
+    timeout1+=200000;
+    timeout2+=250000;
+    #endif
     timespec a,b;
     clock_gettime(CLOCK_MONOTONIC,&a);
     timespecAdd(&a,10000000); //10ms
@@ -2580,7 +2311,7 @@ static void test_16()
     clock_gettime(CLOCK_MONOTONIC,&b);
     if(pthread_mutex_unlock(&t16_m1)!=0) fail("mutex unlock (7)"); //<---
     //iprintf("delta=%lld\n",timespecDelta(&b,&a));
-    if(llabs(timespecDelta(&b,&a))>200000) fail("timedwait (2)");
+    if(llabs(timespecDelta(&b,&a))>timeout1) fail("timedwait (2)");
     if(pthread_create(&thread,NULL,t16_p3,NULL)!=0) fail("pthread_create (10)");
     clock_gettime(CLOCK_MONOTONIC,&a);
     timespecAdd(&a,100000000); //100ms
@@ -2590,8 +2321,8 @@ static void test_16()
     clock_gettime(CLOCK_MONOTONIC,&b);
     if(t16_v1==false) fail("did not really wait");
     if(pthread_mutex_unlock(&t16_m1)!=0) fail("mutex unlock (8)"); //<---
-    //iprintf("delta=%lld\n",timespecDelta(&b,&a));
-    if(llabs(timespecDelta(&b,&a)+70000000)>500000) fail("timedwait (4)");
+    //iprintf("delta=%lld\n",timespecDelta(&b,&a)+70000000);
+    if(llabs(timespecDelta(&b,&a)+70000000)>timeout2) fail("timedwait (4)");
     pthread_join(thread,NULL);
     Thread::sleep(10);
     //
@@ -4072,13 +3803,24 @@ static void test_25()
     //
     // Testing condition_variable timed wait
     //
+    #ifndef __CODE_IN_XRAM
+    long long timeout1=250000;
+    long long timeout2=500000;
+    #else //__CODE_IN_XRAM
+    long long timeout1=350000;
+    long long timeout2=750000;
+    #endif //__CODE_IN_XRAM
+    #ifdef WITH_RTC_AS_OS_TIMER
+    timeout1+=200000;
+    timeout2+=250000;
+    #endif
     {
         unique_lock<mutex> l(t25_m1);
         auto a=chrono::steady_clock::now().time_since_epoch().count();
         if(t25_c1.wait_for(l,10ms)!=cv_status::timeout) fail("timedwait (1)");
         auto b=chrono::steady_clock::now().time_since_epoch().count();
         //iprintf("delta=%lld\n",b-a-10000000);
-        if(llabs(b-a-10000000)>250000) fail("timedwait (2)");
+        if(llabs(b-a-10000000)>timeout1) fail("timedwait (2)");
     }
     {
         unique_lock<mutex> l(t25_m1);
@@ -4087,7 +3829,7 @@ static void test_25()
         if(t25_c1.wait_until(l,start+10ms)!=cv_status::timeout) fail("timedwait (3)");
         auto b=chrono::steady_clock::now().time_since_epoch().count();
         //iprintf("delta=%lld\n",b-a-10000000);
-        if(llabs(b-a-10000000)>250000) fail("timedwait (4)");
+        if(llabs(b-a-10000000)>timeout1) fail("timedwait (4)");
     }
     {
         thread t([]{ this_thread::sleep_for(30ms); t25_c1.notify_one(); });
@@ -4096,7 +3838,7 @@ static void test_25()
         if(t25_c1.wait_for(l,100ms)!=cv_status::no_timeout) fail("timedwait (5)");
         auto b=chrono::steady_clock::now().time_since_epoch().count();
         //iprintf("delta=%lld\n",b-a-30000000);
-        if(llabs(b-a-30000000)>500000) fail("timedwait (6)");
+        if(llabs(b-a-30000000)>timeout2) fail("timedwait (6)");
         t.join();
     }
     pass();
@@ -4419,663 +4161,24 @@ void testCacheAndDMA()
 }
 #endif //_ARCH_CORTEXM7_STM32F7/H7
 
-#ifdef WITH_FILESYSTEM
 //
-// Filesystem test 1
+// Kercalls test (in a separate file, shared with syscalls)
 //
-/*
-tests:
-mkdir()
-fopen()
-fclose()
-fread()
-fwrite()
-fprintf()
-fgets()
-fgetc()
-fseek()
-ftell()
-remove()
-Also tests concurrent write by opening and writing 3 files from 3 threads
-*/
-static volatile bool fs_1_error;
 
-static void fs_t1_p1(void *argv)
-{
-    FILE *f;
-    if((f=fopen("/sd/testdir/file_1.txt","w"))==NULL)
-    {
-        fs_1_error=true;
-        return;
-    }
-    setbuf(f,NULL);
-    char *buf=new char[512];
-    memset(buf,'1',512);
-    int i,j;
-    for(i=0;i<512;i++)
-    {
-        j=fwrite(buf,1,512,f);
-        if(j!=512)
-        {
-            iprintf("Written %d bytes instead of 512\n",j);
-            delete[] buf;
-            fs_1_error=true;
-            fclose(f);
-            return;
-        }
-    }
-    delete[] buf;
-    if(fclose(f)!=0)
-    {
-        fs_1_error=true;
-        return;
-    }
-}
-
-static void fs_t1_p2(void *argv)
-{
-    FILE *f;
-    if((f=fopen("/sd/testdir/file_2.txt","w"))==NULL)
-    {
-        fs_1_error=true;
-        return;
-    }
-    setbuf(f,NULL);
-    char *buf=new char[512];
-    memset(buf,'2',512);
-    int i,j;
-    for(i=0;i<512;i++)
-    {
-        j=fwrite(buf,1,512,f);
-        if(j!=512)
-        {
-            iprintf("Written %d bytes instead of 512\n",j);
-            delete[] buf;
-            fs_1_error=true;
-            fclose(f);
-            return;
-        }
-    }
-    delete[] buf;
-    if(fclose(f)!=0)
-    {
-        fs_1_error=true;
-        return;
-    }
-}
-
-static void fs_t1_p3(void *argv)
-{
-    FILE *f;
-    if((f=fopen("/sd/testdir/file_3.txt","w"))==NULL)
-    {
-        fs_1_error=true;
-        return;
-    }
-    setbuf(f,NULL);
-    char *buf=new char[512];
-    memset(buf,'3',512);
-    int i,j;
-    for(i=0;i<512;i++)
-    {
-        j=fwrite(buf,1,512,f);
-        if(j!=512)
-        {
-            iprintf("Written %d bytes instead of 512\n",j);
-            delete[] buf;
-            fs_1_error=true;
-            fclose(f);
-            return;
-        }
-    }
-    delete[] buf;
-    if(fclose(f)!=0)
-    {
-        fs_1_error=true;
-        return;
-    }
-}
-
-static void fs_test_1()
-{
-    test_name("C standard library file functions + mkdir()");
-    iprintf("Please wait (long test)\n");
-    //Test mkdir (if possible)
-    int result=mkdir("/sd/testdir",0);
-    switch(result)
-    {
-            case 0: break;
-            case -1:
-                if(errno==EEXIST)
-                {
-                    iprintf("Directory test not made because directory"
-                        " already exists\n");
-                    break;
-                } //else fallthrough
-            default:
-                iprintf("mkdir returned %d\n",result);
-                fail("Directory::mkdir()");
-    }
-    //Test concurrent file write access
-    fs_1_error=false;
-    Thread *t1=Thread::create(fs_t1_p1,2048+512,1,NULL,Thread::JOINABLE);
-    Thread *t2=Thread::create(fs_t1_p2,2048+512,1,NULL,Thread::JOINABLE);
-    Thread *t3=Thread::create(fs_t1_p3,2048+512,1,NULL,Thread::JOINABLE);
-    t1->join();
-    t2->join();
-    t3->join();
-    if(fs_1_error) fail("Concurrent write");
-    //Testing file read
-    char *buf=new char[1024];
-    int i,j,k;
-    FILE *f;
-    //file_1.txt
-    if((f=fopen("/sd/testdir/file_1.txt","r"))==NULL)
-        fail("can't open file_1.txt");
-    setbuf(f,NULL);
-    i=0;
-    for(;;)
-    {
-        j=fread(buf,1,1024,f);
-        if(j==0) break;
-        i+=j;
-        for(k=0;k<j;k++) if(buf[k]!='1')
-            fail("read or write error on file_1.txt");
-    }
-    if(i!=512*512) fail("file_1.txt : size error");
-    if(fclose(f)!=0) fail("Can't close file file_1.txt");
-    //file_2.txt
-    if((f=fopen("/sd/testdir/file_2.txt","r"))==NULL)
-        fail("can't open file_2.txt");
-    setbuf(f,NULL);
-    i=0;
-    for(;;)
-    {
-        j=fread(buf,1,1024,f);
-        if(j==0) break;
-        i+=j;
-        for(k=0;k<j;k++) if(buf[k]!='2')
-            fail("read or write error on file_2.txt");
-    }
-    if(i!=512*512) fail("file_2.txt : size error");
-    if(fclose(f)!=0) fail("Can't close file file_2.txt");
-    //file_3.txt
-    if((f=fopen("/sd/testdir/file_3.txt","r"))==NULL)
-        fail("can't open file_3.txt");
-    setbuf(f,NULL);
-    i=0;
-    for(;;)
-    {
-        j=fread(buf,1,1024,f);
-        if(j==0) break;
-        i+=j;
-        for(k=0;k<j;k++) if(buf[k]!='3')
-            fail("read or write error on file_3.txt");
-    }if(i!=512*512) fail("file_3.txt : size error");
-    if(fclose(f)!=0) fail("Can't close file file_3.txt");
-    delete[] buf;
-    //Testing fprintf
-    if((f=fopen("/sd/testdir/file_4.txt","w"))==NULL)
-        fail("can't open w file_4.txt");
-    fprintf(f,"Hello world line 001\n");
-    if(fclose(f)!=0) fail("Can't close w file_4.txt");
-    //Testing append
-    if((f=fopen("/sd/testdir/file_4.txt","a"))==NULL)
-        fail("can't open a file_4.txt");
-    for(i=2;i<=128;i++) fprintf(f,"Hello world line %03d\n",i);
-    if(fclose(f)!=0) fail("Can't close a file_4.txt");
-    //Reading to check (only first 2 lines)
-    if((f=fopen("/sd/testdir/file_4.txt","r"))==NULL)
-        fail("can't open r file_4.txt");
-    char line[80];
-    fgets(line,sizeof(line),f);
-    if(strcmp(line,"Hello world line 001\n")) fail("file_4.txt line 1 error");
-    fgets(line,sizeof(line),f);
-    if(strcmp(line,"Hello world line 002\n")) fail("file_4.txt line 2 error");
-    if(fclose(f)!=0) fail("Can't close r file_4.txt");
-    //Test fseek and ftell. When reaching this point file_4.txt contains:
-    //Hello world line 001\n
-    //Hello world line 002\n
-    //  ...
-    //Hello world line 128\n
-    if((f=fopen("/sd/testdir/file_4.txt","r"))==NULL)
-        fail("can't open r2 file_4.txt");
-    if(ftell(f)!=0) fail("File opend but cursor not @ address 0");
-    fseek(f,-4,SEEK_END);//Seek to 128\n
-    if((fgetc(f)!='1')|(fgetc(f)!='2')|(fgetc(f)!='8')) fail("fgetc SEEK_END");
-    if(ftell(f)!=(21*128-1))
-    {
-        iprintf("ftell=%ld\n",ftell(f));
-        fail("ftell() 1");
-    }
-    fseek(f,21+17,SEEK_SET);//Seek to 002\n
-    if((fgetc(f)!='0')|(fgetc(f)!='0')|(fgetc(f)!='2')|(fgetc(f)!='\n'))
-        fail("fgetc SEEK_SET");
-    if(ftell(f)!=(21*2))
-    {
-        iprintf("ftell=%ld\n",ftell(f));
-        fail("ftell() 2");
-    }
-    fseek(f,21*50+17,SEEK_CUR);//Seek to 053\n
-    if((fgetc(f)!='0')|(fgetc(f)!='5')|(fgetc(f)!='3')|(fgetc(f)!='\n'))
-        fail("fgetc SEEK_CUR");
-    if(ftell(f)!=(21*53))
-    {
-        iprintf("ftell=%ld\n",ftell(f));
-        fail("ftell() 2");
-    }
-    if(fclose(f)!=0) fail("Can't close r2 file_4.txt");
-    //Testing remove()
-    if((f=fopen("/sd/testdir/deleteme.txt","w"))==NULL)
-        fail("can't open deleteme.txt");
-    if(fclose(f)!=0) fail("Can't close deleteme.txt");
-    remove("/sd/testdir/deleteme.txt");
-    if((f=fopen("/sd/testdir/deleteme.txt","r"))!=NULL) fail("remove() error");
-    pass();
-}
+#include "test_syscalls.cpp"
 
 //
-// Filesystem test 2
+// Syscall test (executed in a separate process)
 //
-/*
-tests:
-mkdir/unlink/rename
-*/
 
-/**
- * \param d scan the content of this directory
- * \param a if not null, this file must be in the directory
- * \param b if not null, this file most not be in the directory
- * \return true on success, false on failure
- */
-static bool checkDirContent(const std::string& d, const char *a, const char *b)
+void test_syscalls_process()
 {
-    DIR *dir=opendir(d.c_str());
-    bool found=false;
-    for(;;)
-    {
-        struct dirent *de=readdir(dir);
-        if(de==NULL) break;
-        if(a && !strcasecmp(de->d_name,a)) found=true;
-        if(b && !strcasecmp(de->d_name,b))
-        {
-            closedir(dir);
-            return false;
-        }
-    }
-    closedir(dir);
-    if(a) return found; else return true;
+    ledOn();
+    const char *arg[] = { "/bin/test_process", nullptr };
+    int exitcode=spawnAndWait(arg);
+    if(exitcode!=0) fail("test process has exited with a non-zero exit code");
+    ledOff();
 }
-
-static void checkInDir(const std::string& d, bool createFile)
-{
-    using namespace std;
-    const char dirname1[]="test1";
-    if(mkdir((d+dirname1).c_str(),0755)!=0) fail("mkdir");
-    if(checkDirContent(d,dirname1,0)==false) fail("mkdir 2");
-    const char dirname2[]="test2";
-    if(rename((d+dirname1).c_str(),(d+dirname2).c_str())) fail("rename");
-    if(checkDirContent(d,dirname2,dirname1)==false) fail("rename 2");
-    if(rmdir((d+dirname2).c_str())) fail("rmdir");
-    if(checkDirContent(d,0,dirname2)==false) fail("rmdir 2");
-    
-    if(createFile==false) return;
-    const char filename1[]="test.txt";
-    FILE *f;
-    if((f=fopen((d+filename1).c_str(),"w"))==NULL) fail("fopen");
-    const char teststr[]="Testing\n";
-    fputs(teststr,f);
-    fclose(f);
-    if(checkDirContent(d,filename1,0)==false) fail("fopen 2");
-    const char filename2[]="test2.txt";
-    if(rename((d+filename1).c_str(),(d+filename2).c_str())) fail("rename 3");
-    if(checkDirContent(d,filename2,filename1)==false) fail("rename 4");
-    if((f=fopen((d+filename2).c_str(),"r"))==NULL) fail("fopen");
-    char s[32];
-    fgets(s,sizeof(s),f);
-    if(strcmp(s,teststr)) fail("file content after rename");
-    fclose(f);
-    if(unlink((d+filename2).c_str())) fail("unlink 3");
-    if(checkDirContent(d,0,filename2)==false) fail("unlink 4");
-}
-
-static void fs_test_2()
-{
-    test_name("mkdir/rename/unlink");
-    checkInDir("/",false);
-    DIR *d=opendir("/sd");
-    if(d!=NULL)
-    {
-        // the /sd mountpoint exists, check mkdir/rename/unlink also here
-        closedir(d);
-        checkInDir("/sd/",true);
-    }
-    pass();
-}
-
-//
-// Filesystem test 3
-//
-/*
-tests:
-correctness of write/read on large files
-*/
-
-static void fs_test_3()
-{
-    test_name("Large file check");
-    iprintf("Please wait (long test)\n");
-    
-    const char name[]="/sd/testdir/file_5.dat";
-    const unsigned int size=1024;
-    const unsigned int numBlocks=2048;
-    
-    FILE *f;
-    if((f=fopen(name,"w"))==NULL) fail("open 1");
-    setbuf(f,NULL);
-    char *buf=new char[size];
-    unsigned short checksum=0;
-    for(unsigned int i=0;i<numBlocks;i++)
-    {
-        for(unsigned int j=0;j<size;j++) buf[j]=rand() & 0xff;
-        checksum^=crc16(buf,size);
-        if(fwrite(buf,1,size,f)!=size) fail("write");
-    }
-    if(fclose(f)!=0) fail("close 1");
-
-    if((f=fopen(name,"r"))==NULL) fail("open 2");
-    setbuf(f,NULL);
-    unsigned short outChecksum=0;
-    for(unsigned int i=0;i<numBlocks;i++)
-    {
-        memset(buf,0,size);
-        if(fread(buf,1,size,f)!=size) fail("read");
-        outChecksum^=crc16(buf,size);
-    }
-    if(fclose(f)!=0) fail("close 2");
-    delete[] buf;
-    
-    if(checksum!=outChecksum) fail("checksum");
-    pass();
-}
-
-//
-// Filesystem test 4
-//
-/*
-tests:
-opendir()/readdir()
-*/
-
-unsigned int checkInodes(const char *dir, unsigned int curInode,
-        unsigned int parentInode, short curDev, short parentDev)
-{
-    if(chdir(dir)) fail("chdir");
-    
-    DIR *d=opendir(".");
-    if(d==NULL) fail("opendir");
-    puts(dir);
-    std::set<unsigned int> inodes;
-    unsigned int result=0;
-    for(;;)
-    {
-        struct dirent *de=readdir(d);
-        if(de==NULL) break;
-        
-        struct stat st;
-        if(stat(de->d_name,&st)) fail("stat");
-        printf("inode=%lu dev=%d %s\n",st.st_ino,st.st_dev,de->d_name);
-        
-        if(de->d_ino!=st.st_ino) fail("inode mismatch");
-        
-        bool mustBeDir=false;
-        if(!strcmp(de->d_name,"."))
-        {
-            mustBeDir=true;
-            if(st.st_ino!=curInode) fail(". inode");
-            if(st.st_dev!=curDev) fail("cur dev");
-        } else if(!strcmp(de->d_name,"..")) {
-            mustBeDir=true;
-            if(st.st_ino!=parentInode) fail(".. inode");
-            if(st.st_dev!=parentDev) fail("parent dev");
-        } else if(!strcasecmp(de->d_name,"testdir")) { 
-            mustBeDir=true;
-            result=st.st_ino;
-            if(st.st_dev!=curDev) fail("parent dev");
-        } else if(st.st_dev!=curDev) fail("cur dev");
-        
-        if(mustBeDir)
-        {
-            if(de->d_type!=DT_DIR) fail("d_type");
-            if(!S_ISDIR(st.st_mode)) fail("st_mode");
-        } else {
-            if(!S_ISDIR(st.st_mode))
-            {
-                int fd=open(de->d_name,O_RDONLY);
-                if(fd<0) fail("open");
-                struct stat st2;
-                if(fstat(fd,&st2)) fail("fstat");
-                close(fd);
-                if(memcmp(&st,&st2,sizeof(struct stat)))
-                    fail("stat/fstat mismatch");
-            }
-        }
-        
-        if((de->d_type==DT_DIR) ^ (S_ISDIR(st.st_mode))) fail("dir mismatch");
-        
-        if(st.st_dev==curDev)
-        {
-            if(inodes.insert(st.st_ino).second==false) fail("duplicate inode");
-        }
-    }
-    closedir(d);
-    
-    if(chdir("/")) fail("chdir");
-    return result;
-}
-
-static void fs_test_4()
-{
-    test_name("Directory listing");
-    unsigned int curInode=0, parentInode=0, devFsInode=0, binFsInode=0, sdInode=0;
-    short curDevice=0, devDevice=0, binDevice=0, sdDevice=0;
-    DIR *d=opendir("/");
-    if(d==NULL) fail("opendir");
-    puts("/");
-    for(;;)
-    {
-        struct dirent *de=readdir(d);
-        if(de==NULL) break;
-        //de->d_ino may differ from st.st_ino across mountpoints, such as /dev
-        //and /sd as one is the inode of the covered directory, and the other
-        //the inode of the covering one.
-        //The same happens on Linux and many other UNIX based OSes
-        struct stat st;
-        if(strcmp(de->d_name,"..")) //Don't stat ".."
-        {
-            if(stat(de->d_name,&st)) fail("stat");
-            if((de->d_type==DT_DIR) ^ (S_ISDIR(st.st_mode)))
-                fail("dir mismatch");
-        }
-        if(!strcmp(de->d_name,"."))
-        {
-            if(de->d_type!=DT_DIR) fail("d_type");
-            if(de->d_ino!=st.st_ino) fail("inode mismatch");
-            curInode=st.st_ino;
-            curDevice=st.st_dev;
-        } else if(!strcmp(de->d_name,"..")) {
-            if(de->d_type!=DT_DIR) fail("d_type");
-            st.st_ino=de->d_ino; //Not stat-ing ".."
-            st.st_dev=curDevice;
-            parentInode=de->d_ino;
-        } else if(!strcmp(de->d_name,"dev")) {
-            if(de->d_type!=DT_DIR) fail("d_type");
-            devFsInode=st.st_ino;
-            devDevice=st.st_dev;
-        } else if(!strcmp(de->d_name,"bin")) {
-            if(de->d_type!=DT_DIR) fail("d_type");
-            binFsInode=st.st_ino;
-            binDevice=st.st_dev;
-        } else if(!strcmp(de->d_name,"sd")) {
-            if(de->d_type!=DT_DIR) fail("d_type");
-            sdInode=st.st_ino;
-            sdDevice=st.st_dev;
-        }
-        
-        printf("inode=%lu dev=%d %s\n",st.st_ino,st.st_dev,de->d_name);
-    }
-    closedir(d);
-    
-    if(curInode!=parentInode) fail("/..");
-    
-    #ifdef WITH_DEVFS
-    if(devFsInode==0 || devDevice==0) fail("dev");
-    checkInodes("/dev",devFsInode,curInode,devDevice,curDevice);
-    #endif //WITH_DEVFS
-    ///bin may not exist, so if they're both zero it's not an error
-    if((binFsInode==0) ^ (binDevice==0)) fail("bin");
-    if(binFsInode!=0) checkInodes("/bin",binFsInode,curInode,binDevice,curDevice);
-    if(sdInode==0 || sdDevice==0) fail("sd");
-    int testdirIno=checkInodes("/sd",sdInode,curInode,sdDevice,curDevice);
-    if(testdirIno==0) fail("no testdir");
-    checkInodes("/sd/testdir",testdirIno,sdInode,sdDevice,sdDevice);
-    pass();
-}
-
-
-//
-// Filesystem test 5
-//
-/*
-tests:
-POSIX behavior when seeking past the end
-*/
-
-static void fs_t5_p1(int nChunks)
-{
-    const char file[]="/sd/seek.dat";
-    constexpr int chunkSize=32;
-    char chunk[chunkSize];
-    int fd;
-    off_t pos;
-    size_t count;
-    //Remove previous file if present
-    fd=open(file,O_RDONLY);
-    if(fd>=0)
-    {
-        close(fd);
-        if(unlink(file)!=0) fail("unlink");
-    }
-    //Open for writing, seek past the end, don't write anything, check file size
-    fd=open(file,O_WRONLY|O_CREAT,0777);
-    if(fd<0) fail("open 1");
-    pos=lseek(fd,nChunks*chunkSize,SEEK_SET);
-    if(pos!=nChunks*chunkSize) fail("lseek");
-    pos=lseek(fd,0,SEEK_END);
-    if(pos!=0) fail("lseek modified size");
-    close(fd);
-    //Open for reading, seek past the end, check file size again
-    fd=open(file,O_RDONLY);
-    if(fd<0) fail("open");
-    pos=lseek(fd,nChunks*chunkSize,SEEK_SET);
-    if(pos!=nChunks*chunkSize) fail("lseek");
-    count=read(fd,chunk,chunkSize);
-    if(count!=0) fail("read");
-    pos=lseek(fd,0,SEEK_END);
-    if(pos!=0) fail("lseek modified size");
-    close(fd);
-    //Open for writing, seek past the end and write, check file size
-    fd=open(file,O_WRONLY|O_CREAT,0777);
-    if(fd<0) fail("open");
-    pos=lseek(fd,nChunks*chunkSize,SEEK_SET);
-    if(pos!=nChunks*chunkSize) fail("lseek");
-    memset(chunk,1,chunkSize);
-    count=write(fd,chunk,chunkSize);
-    if(count!=chunkSize) fail("write");
-    pos=lseek(fd,0,SEEK_END);
-    if(pos!=(nChunks+1)*chunkSize) fail("lseek modified size");
-    close(fd);
-    //Open for reading, seek past the end, check file size again, check content
-    fd=open(file,O_RDONLY);
-    if(fd<0) fail("open");
-    pos=lseek(fd,2*nChunks*chunkSize,SEEK_SET);
-    if(pos!=2*nChunks*chunkSize) fail("lseek");
-    pos=lseek(fd,0,SEEK_END);
-    if(pos!=(nChunks+1)*chunkSize) fail("lseek modified size");
-    pos=lseek(fd,0,SEEK_SET);
-    if(pos!=0) fail("lseek");
-    for(int i=0;i<nChunks;i++)
-    {
-        memset(chunk,2,chunkSize);
-        count=read(fd,chunk,chunkSize);
-        if(count!=chunkSize) fail("read");
-        for(int j=0;j<chunkSize;j++) if(chunk[j]!=0) fail("gap not zeroed");
-    }
-    memset(chunk,2,chunkSize);
-    count=read(fd,chunk,chunkSize);
-    if(count!=chunkSize) fail("read");
-    for(int j=0;j<chunkSize;j++) if(chunk[j]!=1) fail("write/read fail");
-    memset(chunk,2,chunkSize);
-    count=read(fd,chunk,chunkSize);
-    if(count!=0) fail("read past eof");
-    for(int j=0;j<chunkSize;j++) if(chunk[j]!=2) fail("buffer altered");
-    close(fd);
-    //Open for read/write a non-empty file, mix and match of the above
-    fd=open(file,O_RDWR);
-    if(fd<0) fail("open");
-    pos=lseek(fd,2*nChunks*chunkSize,SEEK_SET);
-    if(pos!=2*nChunks*chunkSize) fail("lseek");
-    count=read(fd,chunk,chunkSize);
-    if(count!=0) fail("read");
-    pos=lseek(fd,0,SEEK_CUR);
-    if(pos!=2*nChunks*chunkSize) fail("read modified pos");
-    pos=lseek(fd,0,SEEK_END);
-    if(pos!=(nChunks+1)*chunkSize) fail("lseek modified size");
-    pos=lseek(fd,2*nChunks*chunkSize,SEEK_SET);
-    if(pos!=2*nChunks*chunkSize) fail("lseek");
-    memset(chunk,1,chunkSize);
-    count=write(fd,chunk,chunkSize);
-    if(count!=chunkSize) fail("write");
-    pos=lseek(fd,0,SEEK_END);
-    if(pos!=(2*nChunks+1)*chunkSize) fail("lseek modified size");
-    pos=lseek(fd,0,SEEK_SET);
-    if(pos!=0) fail("lseek");
-    for(int i=0;i<nChunks;i++)
-    {
-        memset(chunk,2,chunkSize);
-        count=read(fd,chunk,chunkSize);
-        if(count!=chunkSize) fail("read");
-        for(int j=0;j<chunkSize;j++) if(chunk[j]!=0) fail("gap not zeroed");
-    }
-    memset(chunk,2,chunkSize);
-    count=read(fd,chunk,chunkSize);
-    if(count!=chunkSize) fail("read");
-    for(int i=0;i<nChunks-1;i++)
-    {
-        memset(chunk,2,chunkSize);
-        count=read(fd,chunk,chunkSize);
-        if(count!=chunkSize) fail("read");
-        for(int j=0;j<chunkSize;j++) if(chunk[j]!=0) fail("gap not zeroed");
-    }
-    memset(chunk,2,chunkSize);
-    count=read(fd,chunk,chunkSize);
-    if(count!=chunkSize) fail("read");
-    for(int j=0;j<chunkSize;j++) if(chunk[j]!=1) fail("write/read fail");
-    memset(chunk,2,chunkSize);
-    count=read(fd,chunk,chunkSize);
-    if(count!=0) fail("read past eof");
-    close(fd);
-}
-
-static void fs_test_5()
-{
-    test_name("Seek past the end");
-    fs_t5_p1(1);  //Less than a sector
-    fs_t5_p1(16); //Exactly a sector
-    fs_t5_p1(60); //More than a sector
-    pass();
-}
-#endif //WITH_FILESYSTEM
 
 //
 // C++ exceptions thread safety test
@@ -5297,7 +4400,7 @@ static void benchmark_3()
 //
 /*
 tests:
-Mutex lonk/unlock time
+Mutex lock/unlock time
 */
 
 volatile bool b4_end=false;
@@ -5393,279 +4496,3 @@ static void benchmark_4()
     }
     iprintf("%d fast disable/enable interrupts pairs per second\n",i);
 }
-
-#ifdef WITH_PROCESSES
-
-unsigned int* memAllocation(unsigned int size)
-{
-	unsigned int *p = ProcessPool::instance().allocate(size);
-	memset(p, WATERMARK_FILL, size);
-	iprintf("Allocated %d bytes. Base: %p. Size: 0x%x.\n\n", size, p, size);
-	return p;
-}
-
-// Returns true if a watermark filled memory zone is not corrupted.
-// 'base' must be 4-byte aligned
-bool memCheck(unsigned int *base, unsigned int size)
-{
-	for(unsigned int i = 0; i < size / 4; i++)
-	{
-		if(*(base + i) != WATERMARK_FILL)
-			return false;
-	}
-	return true;
-}
-
-void runElfTest(const char *name, const unsigned char *filename, unsigned int file_length)
-{
-	iprintf("Executing %s...", name);
-	try
-	{
-		ElfProgram prog(reinterpret_cast<const unsigned int*>(filename),file_length);
-		iprintf("not passed.\n");
-	}
-	catch (std::runtime_error &err)
-	{
-		iprintf("passed.\n");
-	}
-}
-
-//It runs the program, waits for its exit, and returns the exit code
-int runProgram(const unsigned char *filename, unsigned int file_length)
-{
-	int ec;
-	ElfProgram prog(reinterpret_cast<const unsigned int*>(filename), file_length);
-	pid_t child=Process::create(prog);
-	Process::waitpid(child, &ec, 0);
-	return ec;
-}
-
-//Returns true if the process has been signaled with SIGSEV
-bool isSignaled(int exit_code)
-{
-	if(WIFSIGNALED(exit_code) && WTERMSIG(exit_code)==SIGSEGV)
-	{
-		return true;
-	}
-	return false;
-}
-
-void mpuTest1()
-{
-	int ec;
-	unsigned int *addr = (unsigned int*) 0x64100000;
-	iprintf("Executing MPU Test 1...\n");
-	ec = runProgram(test1_elf, test1_elf_len);
-	if(isSignaled(ec))
-	{
-		if(*addr == 0xbbbbbbbb)
-			iprintf("...not passed! The process has written a forbidden memory location.\n\n");
-		else if(*addr == WATERMARK_FILL)
-			iprintf("...passed!\n\n");
-		else
-			iprintf("...not passed! Memory has been somehow corrupted.\n\n");
-	}
-	else
-	{
-		iprintf("...not passed! Process exited normally.\n\n");
-	}
-}
-
-void mpuTest2()
-{
-	int ec;
-	unsigned int *addr = (unsigned int*) 0x64100200;
-	iprintf("Executing MPU Test 2...\n");
-	ec = runProgram(test2_elf, test2_elf_len);
-	if(isSignaled(ec))
-	{
-		if(*addr == WATERMARK_FILL)
-			iprintf("...passed!\n\n");
-		else
-			iprintf("...not passed! Memory has been somehow corrupted.\n\n");
-	}
-	else
-	{
-		iprintf("...not passed! Process exited normally.\n\n");
-	}
-}
-
-void mpuTest3()
-{
-	int ec;
-	unsigned int *addr = (unsigned int*) 0x64100200;
-	iprintf("Executing MPU Test 3...\n");
-	ec = runProgram(test3_elf, test3_elf_len);
-	if(isSignaled(ec))
-	{
-		if(*addr == 0xbbbbbbbb)
-			iprintf("...not passed! The process has written a forbidden memory location.\n\n");
-		else
-			iprintf("...passed!\n\n");
-	}
-	else
-	{
-		iprintf("...not passed! Process exited normally.\n\n");
-	}
-}
-
-void mpuTest4()
-{
-	int ec;
-	iprintf("Executing MPU Test 4...\n");
-	ec = runProgram(test4_elf, test4_elf_len);
-	if(isSignaled(ec))
-	{
-		iprintf("...passed!.\n\n");
-	}
-	else
-	{
-		iprintf("...not passed! Process exited normally.\n\n");
-	}
-}
-
-void mpuTest5()
-{
-	int ec;
-	unsigned int *addr = (unsigned int*) 0x64101000;
-	iprintf("Executing MPU Test 5...\n");
-	ec = runProgram(test5_elf, test5_elf_len);
-	if(isSignaled(ec))
-	{
-		if(*addr == 0xbbbbbbbb)
-			iprintf("...not passed! The process has written a forbidden memory location.\n\n");
-		else
-			iprintf("...passed!.\n\n");
-	}
-	else
-	{
-		iprintf("...not passed! Process exited normally.\n\n");
-	}
-}
-
-void mpuTest6()
-{
-	int ec;
-	unsigned int *addr = (unsigned int*) 0x64101404;
-	iprintf("Executing MPU Test 6...\n");
-	ec = runProgram(test6_elf, test6_elf_len);
-	if(isSignaled(ec))
-	{
-		if(*addr == 0xbbbbbbbb)
-			iprintf("...not passed! The process has written a forbidden memory location.\n\n");
-		else
-			iprintf("...passed!.\n\n");
-	}
-	else
-	{
-		iprintf("...not passed! Process exited normally.\n\n");
-	}
-}
-
-void mpuTest7()
-{
-	int ec;
-        unsigned int memSize = 8192;
-        
-        iprintf("Executing MPU Test 7...\n");
-        unsigned int *p = ProcessPool::instance().allocate(memSize);
-        memset(p, WATERMARK_FILL, memSize);
-	ElfProgram prog(reinterpret_cast<const unsigned int*>(test7_elf), test7_elf_len);
-	pid_t child=Process::create(prog);
-	delayMs(1000);
-	Process::waitpid(child, &ec, 0);
-	if(isSignaled(ec))
-	{       
-                if(memCheck(p, memSize) == true)
-                    iprintf("...passed!.\n\n");
-                else
-                    iprintf("...not passed! Memory NOT sane!");
-                ProcessPool::instance().deallocate(p);
-	}
-	else
-	{
-		iprintf("...not passed! Process exited normally.\n\n");
-                ProcessPool::instance().deallocate(p);
-	}
-}
-
-void mpuTest8()
-{
-	// We create two processes. The first goes to sleep for 2 seconds,
-	// while the second process tries to access the data region of the
-	// first.
-	unsigned int *addr = (unsigned int*) 0x64104004;
-	iprintf("Executing MPU Test 8...\n");
-	ElfProgram prog1(reinterpret_cast<const unsigned int*>(test8_1_elf),test8_1_elf_len);
-	ElfProgram prog2(reinterpret_cast<const unsigned int*>(test8_2_elf),test8_2_elf_len);
-	pid_t child1=Process::create(prog1);
-	pid_t child2=Process::create(prog2);
-	int ec1, ec2;
-	Process::waitpid(child1,&ec1,0);
-	Process::waitpid(child2,&ec2,0);
-	if(WIFSIGNALED(ec2) && (WTERMSIG(ec2) == SIGSEGV) && WIFEXITED(ec1))
-	{
-		if(*addr == 0xbbbbbbbb)
-			iprintf("...not passed! The process has written a forbidden memory location.\n\n");
-		else
-			iprintf("...passed!.\n\n");
-	}
-	else
-	{
-		iprintf("...not passed!\n\n");
-	}
-}
-
-void mpuTest9()
-{
-	iprintf("Executing MPU Test 9...\n");
-	ElfProgram prog(reinterpret_cast<const unsigned int*>(test9_elf),test9_elf_len);
-	std::vector<pid_t> pids;
-	int ec;
-	for(unsigned int i = 0; i < 100; i++)
-	{
-		pid_t pid;
-		try {
-			pid = Process::create(prog);
-			pids.push_back(pid);
-		}
-		catch (std::bad_alloc &ex)
-		{
-			iprintf("Bad alloc raised: %s\nIteration is: %d\n", ex.what(), i);
-			break;
-		}
-	}
-	iprintf("Allocated %d processes before system ran out of memory.\n", pids.size());
-	for(unsigned int i = 0; i < pids.size(); i++)
-	{
-		Process::waitpid(pids[i], &ec, 0);
-		//iprintf("Process %d has terminated with return code: %d\n", pids[i], ec);
-	}
-	iprintf("...passed!.\n\n");
-}
-
-void mpuTest10()
-{
-	// The first process is allocated and sent to sleep. The second process statically
-	// allocates a big array and calls a syscall, which will try to write in the memory
-	// chunk owned by the first process.
-	// The first process should end properly, the second process should fault.
-	int ec1, ec2;
-	iprintf("Executing MPU Test 10...\n");
-	ElfProgram prog1(reinterpret_cast<const unsigned int*>(test10_1_elf), test10_1_elf_len);
-	ElfProgram prog2(reinterpret_cast<const unsigned int*>(test10_2_elf), test10_2_elf_len);
-	pid_t child1=Process::create(prog1);
-	pid_t child2=Process::create(prog2);
-	Process::waitpid(child1, &ec1, 0);
-	Process::waitpid(child2, &ec2, 0);
-
-	if(!isSignaled(ec1) && isSignaled(ec2))
-	{
-		iprintf("...passed!.\n\n");
-	}
-	else
-	{
-		iprintf("...not passed!\n\n");
-	}
-}
-#endif //WITH_PROCESSES

@@ -1100,12 +1100,9 @@ private:
      * Create a thread to be used inside a process. The thread is created in
      * WAIT status, a wakeup() on it is required to actually start it.
      * \param startfunc entry point
-     * \param argv parameter to be passed to the entry point
-     * \param options thread options
      * \param proc process to which this thread belongs
      */
-    static Thread *createUserspace(void *(*startfunc)(void *),
-        void *argv, unsigned short options, Process *proc);
+    static Thread *createUserspace(void *(*startfunc)(void *), Process *proc);
     
     /**
      * Setup the userspace context of the thread, so that it can be later
@@ -1119,9 +1116,10 @@ private:
      * \param envp pointer to environment variables
      * \param gotBase base address of the GOT, also corresponding to the start
      * of the RAM image of the process
+     * \param stackSize size of the userspace stack, used for bound checking
      */
     static void setupUserspaceContext(unsigned int entry, int argc, void *argvSp,
-        void *envp, unsigned int *gotBase);
+        void *envp, unsigned int *gotBase, unsigned int stackSize);
     
     #endif //WITH_PROCESSES
 
@@ -1227,6 +1225,7 @@ private:
     ///user mode. For kernel threads (i.e, threads where proc==kernel) this
     ///pointer is null
     unsigned int *userCtxsave;
+    unsigned int *userWatermark;
     #endif //WITH_PROCESSES
     #ifdef WITH_CPU_TIME_COUNTER
     CPUTimeCounterPrivateThreadData timeCounterData;
@@ -1251,7 +1250,7 @@ private:
     //Needs access to cppReent
     friend class CppReentrancyAccessor;
     #ifdef WITH_PROCESSES
-    //Needs PKcreateUserspace(), setupUserspaceContext(), switchToUserspace()
+    //Needs createUserspace(), setupUserspaceContext(), switchToUserspace()
     friend class Process;
     #endif //WITH_PROCESSES
     #ifdef WITH_CPU_TIME_COUNTER

@@ -55,7 +55,9 @@ ENTRY(_Z13Reset_Handlerv)
  * the DMA to access it, but the datasheet is unclear about performance
  * penalties for doing so. To avoid nonuniform DMA memory access latencies,
  * we leave this 64KB DTCM unused except for the first 512Bytes which are for
- * the interrupt stack. This leaves us with 384KB of RAM
+ * the interrupt stack. This leaves us with 256KB of RAM
+ * TODO: in the processes linker script the entire kernel was moved in the
+ * dtcm and it worked, maybe reconsider using the dtcm someday
  */
 MEMORY
 {

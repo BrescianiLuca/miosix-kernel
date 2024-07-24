@@ -14,6 +14,7 @@
 
 void setupClockTree()
 {
+    //TODO: shouldn't we select voltage range 1 too? Don't have this board so can't test
     static_assert(HSE_VALUE==8000000,"Unsupported HSE oscillator frequency");
     static_assert(SYSCLK_FREQ_32MHz==32000000,"Unsupported target SYSCLK");
 
@@ -119,7 +120,7 @@ void Reset_Handler()
                  "msr psp, r0                  \n\t"
                  "movs r0, #2                  \n\n" //Privileged, process stack
                  "msr control, r0              \n\t"
-                 "isb                          \n\t":::"r0");
+                 "isb                          \n\t":::"r0","cc");
 
     program_startup();
 }

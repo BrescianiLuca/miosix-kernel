@@ -101,7 +101,7 @@ FileDescriptorTable::FileDescriptorTable(const FileDescriptorTable& rhs)
 
 int FileDescriptorTable::open(const char* name, int flags, int mode)
 {
-    if(name==0 || name[0]=='\0') return -EFAULT;
+    if(name==nullptr || name[0]=='\0') return -EFAULT;
     Lock<FastMutex> l(mutex);
     int fd=getAvailableFd();
     if(fd<0) return fd;
@@ -241,6 +241,18 @@ ssize_t FileDescriptorTable::readlink(const char *name, char *buf, size_t size)
     return result;
 }
 
+int FileDescriptorTable::truncate(const char *name, off_t size)
+{
+    if(size<0) return -EINVAL;
+    if(name==nullptr || name[0]=='\0') return -EFAULT;
+    string path=absolutePath(name);
+    if(path.empty()) return -ENAMETOOLONG;
+    ResolvedPath openData=FilesystemManager::instance().resolvePath(path);
+    if(openData.result<0) return openData.result;
+    StringPart sp(path,string::npos,openData.off);
+    return openData.fs->truncate(sp,size);
+}
+
 int FileDescriptorTable::rename(const char *oldName, const char *newName)
 {
     if(oldName==0 || oldName[0]=='\0') return -EFAULT;
@@ -308,14 +320,6 @@ int FileDescriptorTable::statImpl(const char* name, struct stat* pstat, bool f)
     return FilesystemManager::instance().statHelper(path,pstat,f);
 }
 
-FileDescriptorTable::~FileDescriptorTable()
-{
-    FilesystemManager::instance().removeFileDescriptorTable(this);
-    //There's no need to lock the mutex and explicitly close files eventually
-    //left open, because if there are other threads accessing this while we are
-    //being deleted we have bigger problems anyway
-}
-
 string FileDescriptorTable::absolutePath(const char* path)
 {
     size_t len=strlen(path);
@@ -324,6 +328,14 @@ string FileDescriptorTable::absolutePath(const char* path)
     Lock<FastMutex> l(mutex);
     if(len+cwd.length()>PATH_MAX) return "";
     return cwd+path;
+}
+
+FileDescriptorTable::~FileDescriptorTable()
+{
+    FilesystemManager::instance().removeFileDescriptorTable(this);
+    //There's no need to lock the mutex and explicitly close files eventually
+    //left open, because if there are other threads accessing this while we are
+    //being deleted we have bigger problems anyway
 }
 
 int FileDescriptorTable::getAvailableFd()
@@ -851,7 +863,7 @@ basicFilesystemSetup(intrusive_ref_ptr<Device> dev)
     fsm.setDevFs(devfs);
     #endif //WITH_DEVFS
 
-    #ifdef WITH_PROCESSES
+    #ifdef WITH_ROMFS
     {
         bootlog("Mounting RomFs as /bin ... ");
         StringPart sp("bin");
@@ -868,20 +880,23 @@ basicFilesystemSetup(intrusive_ref_ptr<Device> dev)
         }
         bootlog(ok ? "Ok\n" : "Failed\n");
     }
-    #endif //WITH_PROCESSES
+    #endif //WITH_ROMFS
 
-    #ifdef WITH_DEVFS
-    #define TRY_MOUNT(x) if (tryMount<x>(#x, dev, rootFs, devfs)) return devfs
-    #else
-    #define TRY_MOUNT(x) if (tryMount<x>(#x, dev, rootFs)) return
-    #endif
-    #ifdef WITH_FATFS
-    TRY_MOUNT(Fat32Fs);
-    #endif
-    #ifdef WITH_LITTLEFS
-    TRY_MOUNT(LittleFS);
-    #endif
-    #undef TRY_MOUNT
+    if(dev)
+    {
+        #ifdef WITH_DEVFS
+        #define TRY_MOUNT(x) if (tryMount<x>(#x, dev, rootFs, devfs)) return devfs
+        #else
+        #define TRY_MOUNT(x) if (tryMount<x>(#x, dev, rootFs)) return
+        #endif
+        #ifdef WITH_FATFS
+        TRY_MOUNT(Fat32Fs);
+        #endif
+        #ifdef WITH_LITTLEFS
+        TRY_MOUNT(LittleFS);
+        #endif
+        #undef TRY_MOUNT
+    }
     
     #ifdef WITH_DEVFS
     return devfs;

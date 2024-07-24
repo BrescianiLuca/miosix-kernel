@@ -313,6 +313,28 @@ public:
      * \return 0 on success, or a negative number on failure
      */
     ssize_t readlink(const char *name, char *buf, size_t size);
+
+    /**
+     * Change file size
+     * \param name file to truncate
+     * \param size new file size
+     * \return 0 on success, or a negative number on failure
+     */
+    int truncate(const char *name, off_t size);
+
+    /**
+     * Change file size
+     * \param fd file descriptor
+     * \param size new file size
+     * \return 0 on success, or a negative number on failure
+     */
+    int ftruncate(int fd, off_t size)
+    {
+        if(size<0) return -EINVAL;
+        intrusive_ref_ptr<FileBase> file=getFile(fd);
+        if(!file) return -EBADF;
+        return file->ftruncate(size);
+    }
     
     /**
      * Rename a file or directory
@@ -357,13 +379,7 @@ public:
         if(fd<0 || fd>=MAX_OPEN_FILES) return intrusive_ref_ptr<FileBase>();
         return atomic_load(files+fd);
     }
-    
-    /**
-     * Destructor
-     */
-    ~FileDescriptorTable();
-    
-private:
+
     /**
      * Append cwd to path if it is not an absolute path
      * \param path an absolute or relative path, must not be null
@@ -371,6 +387,13 @@ private:
      * PATH_MAX
      */
     std::string absolutePath(const char *path);
+    
+    /**
+     * Destructor
+     */
+    ~FileDescriptorTable();
+    
+private:
     
     /**
      * Return file information (implements both stat and lstat)
