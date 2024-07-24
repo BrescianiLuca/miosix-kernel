@@ -43,6 +43,7 @@
 #include <string.h>
 #include <reent.h>
 #include "interfaces/deep_sleep.h"
+#include "core/interrupts.h"
 
 /*
  * Used by assembler context switch macros
@@ -177,7 +178,20 @@ void restartKernel()
     //are disabled with an InterruptDisableLock
     if(interruptDisableNesting==0)
     {
-        //If we missed preemptions yield immediately
+        //If we missed a preemption yield immediately. This mechanism works the
+        //same way as the hardware implementation of interrupts that remain
+        //pending if they occur while interrupts are disabled.
+        //This is important to make sure context switches to a higher priority
+        //thread happen in a timely fashion.
+        //It is important that pendingWakeup is set to true any time the
+        //scheduler is called but it could not run due to the kernel being
+        //paused regardless of whether the scheduler has been called by the
+        //timer irq or any peripheral irq.
+        //With the tickless kernel, this is also important to prevent deadlocks
+        //as the idle thread is no longer periodically interrupted by timer
+        //ticks and it does pause the kernel. If the interrupt that wakes up
+        //a thread fails to call the scheduler since the idle thread paused the
+        //kernel and pendingWakeup is not set, this could cause a deadlock.
         if(old==1 && pendingWakeup)
         { 
             pendingWakeup=false;
@@ -616,13 +630,26 @@ int Thread::getStackSize()
 void Thread::IRQstackOverflowCheck()
 {
     const unsigned int watermarkSize=WATERMARK_LEN/sizeof(unsigned int);
-    for(unsigned int i=0;i<watermarkSize;i++)
+    #ifdef WITH_PROCESSES
+    if(const_cast<Thread*>(runningThread)->flags.isInUserspace())
     {
+        bool overflow=false;
+        for(unsigned int i=0;i<watermarkSize;i++)
+            if(runningThread->userWatermark[i]!=WATERMARK_FILL) overflow=true;
+        if(runningThread->userCtxsave[stackPtrOffsetInCtxsave] <
+            reinterpret_cast<unsigned int>(runningThread->userWatermark+watermarkSize))
+            overflow=true;
+        if(overflow) IRQreportFault(miosix_private::FaultData(fault::STACKOVERFLOW,0));
+    } else {
+    #endif //WITH_PROCESSES
+    for(unsigned int i=0;i<watermarkSize;i++)
         if(runningThread->watermark[i]!=WATERMARK_FILL) errorHandler(STACK_OVERFLOW);
-    }
     if(runningThread->ctxsave[stackPtrOffsetInCtxsave] <
         reinterpret_cast<unsigned int>(runningThread->watermark+watermarkSize))
         errorHandler(STACK_OVERFLOW);
+    #ifdef WITH_PROCESSES
+    }
+    #endif //WITH_PROCESSES
 }
 
 #ifdef WITH_PROCESSES
@@ -662,11 +689,10 @@ miosix_private::SyscallParameters Thread::switchToUserspace()
     return result;
 }
 
-Thread *Thread::createUserspace(void *(*startfunc)(void *), void *argv,
-                    unsigned short options, Process *proc)
+Thread *Thread::createUserspace(void *(*startfunc)(void *), Process *proc)
 {
-    Thread *thread=doCreate(startfunc,SYSTEM_MODE_PROCESS_STACK_SIZE,argv,
-            options,false);
+    Thread *thread=doCreate(startfunc,SYSTEM_MODE_PROCESS_STACK_SIZE,nullptr,
+            Thread::DEFAULT,false);
     if(thread==nullptr) return nullptr;
 
     unsigned int *base=thread->watermark;
@@ -699,10 +725,21 @@ Thread *Thread::createUserspace(void *(*startfunc)(void *), void *argv,
 }
 
 void Thread::setupUserspaceContext(unsigned int entry, int argc, void *argvSp,
-    void *envp, unsigned int *gotBase)
+    void *envp, unsigned int *gotBase, unsigned int stackSize)
 {
+    //Fill watermark and stack
+    char *base=reinterpret_cast<char*>(argvSp)-stackSize-WATERMARK_LEN;
+    memset(base, WATERMARK_FILL, WATERMARK_LEN);
+    memset(base+WATERMARK_LEN, STACK_FILL, stackSize);
+    runningThread->userWatermark=reinterpret_cast<unsigned int*>(base);
+    //Initialize registers
     void *(*startfunc)(void*)=reinterpret_cast<void *(*)(void*)>(entry);
-    miosix_private::initCtxsave(runningThread->userCtxsave,startfunc,argc,argvSp,envp,gotBase);
+    //NOTE: for the main thread in a process userWatermark is also the end of
+    //the heap, used by _sbrk_r. When we'll implement threads in processes that
+    //pointer will just point to the watermark end of the thread, but userspace
+    //threads can just ignore that value so we'll pass it unconditionally
+    miosix_private::initCtxsave(runningThread->userCtxsave,startfunc,
+        argc,argvSp,envp,gotBase,runningThread->userWatermark);
 }
 
 #endif //WITH_PROCESSES

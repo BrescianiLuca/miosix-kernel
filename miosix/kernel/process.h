@@ -74,6 +74,9 @@ public:
      */
     pid_t getPid() const { return pid; }
     
+    /**
+     * \return the process file descriptor table
+     */
     FileDescriptorTable& getFileTable() { return fileTable; }
     
 protected:
@@ -104,7 +107,7 @@ public:
      * \throws std::exception or a subclass in case of errors, including
      * not emough memory to spawn the process
      */
-    static pid_t create(const ElfProgram& program, ArgsBlock&& args);
+    static pid_t create(ElfProgram&& program, ArgsBlock&& args);
 
     /**
      * Create a new process from a file in the filesystem
@@ -173,7 +176,7 @@ private:
      * \param program program that will be executed by the process
      * \param args program arguments and environment variables
      */
-    Process(const FileDescriptorTable& fdt, const ElfProgram& program,
+    Process(const FileDescriptorTable& fdt, ElfProgram&& program,
             ArgsBlock&& args);
 
     /**
@@ -181,14 +184,7 @@ private:
      * \param program program that will be executed by the process
      * \param args program arguments and environment variables
      */
-    void load(const ElfProgram& program, ArgsBlock&& args);
-
-    /**
-     * Lookup for an executable file on the filesystem
-     * \param path executable file path
-     * \return a pair with an elf program and an error code
-     */
-    static std::pair<ElfProgram,int> lookup(const char *path);
+    void load(ElfProgram&& program, ArgsBlock&& args);
     
     /**
      * Contains the process' main loop. 
@@ -360,43 +356,46 @@ enum class Syscall
     UNLINK    = 19,
     SYMLINK   = 20,
     READLINK  = 21,
-    RENAME    = 22,
-    CHMOD     = 23,
-    FCHMOD    = 24,
-    CHOWN     = 25,
-    FCHOWN    = 26,
-    LCHOWN    = 27,
-    DUP       = 28,
-    DUP2      = 29,
-    PIPE      = 30,
-    ACCESS    = 31,
+    TRUNCATE  = 22,
+    FTRUNCATE = 23,
+    RENAME    = 24,
+    CHMOD     = 25,
+    FCHMOD    = 26,
+    CHOWN     = 27,
+    FCHOWN    = 28,
+    LCHOWN    = 29,
+    DUP       = 30,
+    DUP2      = 31,
+    PIPE      = 32,
+    ACCESS    = 33,
+    //From 34 to 37 reserved for future use
 
     // Time syscalls
-    GETTIME   = 32,
-    SETTIME   = 33,
-    NANOSLEEP = 34,
-    GETRES    = 35,
-    ADJTIME   = 36,
+    GETTIME   = 38,
+    SETTIME   = 39,
+    NANOSLEEP = 40,
+    GETRES    = 41,
+    ADJTIME   = 42,
 
     // Process syscalls
-    EXIT      = 37,
-    EXECVE    = 38,
-    SPAWN     = 39,
-    KILL      = 40,
-    WAITPID   = 41,
-    GETPID    = 42,
-    GETPPID   = 43,
-    GETUID    = 44,
-    GETGID    = 45,
-    GETEUID   = 46,
-    GETEGID   = 47,
-    SETUID    = 48,
-    SETGID    = 49,
+    EXIT      = 43,
+    EXECVE    = 44,
+    SPAWN     = 45,
+    KILL      = 46,
+    WAITPID   = 47,
+    GETPID    = 48,
+    GETPPID   = 49,
+    GETUID    = 50,
+    GETGID    = 51,
+    GETEUID   = 52,
+    GETEGID   = 53,
+    SETUID    = 54,
+    SETGID    = 55,
 
     // Filesystem syscalls
-    MOUNT     = 50,
-    UMOUNT    = 51,
-    MKFS      = 52, //Moving filesystem creation code to kernel
+    MOUNT     = 56,
+    UMOUNT    = 57,
+    MKFS      = 58, //Moving filesystem creation code to kernel
 };
 
 } //namespace miosix

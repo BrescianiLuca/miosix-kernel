@@ -92,6 +92,7 @@ public:
     virtual ssize_t write(const void *buf, size_t count) override;
     virtual ssize_t read(void *buf, size_t count) override;
     virtual off_t lseek(off_t pos, int whence) override;
+    virtual int ftruncate(off_t size) override;
     virtual int fstat(struct stat *pstat) const override;
 
     ~LittleFSFile()
@@ -267,6 +268,14 @@ int LittleFS::lstat(StringPart &name, struct stat *pstat)
     return 0;
 }
 
+int LittleFS::truncate(StringPart& name, off_t size)
+{
+    //LittleFs does not have a truncate, so we need to open the file and ftruncate
+    intrusive_ref_ptr<FileBase> file;
+    if(int result=open(file,name,O_WRONLY,0)) return result;
+    return file->ftruncate(size);
+}
+
 int LittleFS::unlink(StringPart &name)
 {
     if(mountFailed()) return -ENOENT;
@@ -310,6 +319,7 @@ LittleFS::~LittleFS()
 
 int lfsErrorToPosix(int lfs_err)
 {
+    //TODO double check
     if(lfs_err)
     {
         if(lfs_err == LFS_ERR_CORRUPT) return -EIO;
@@ -324,8 +334,10 @@ int posixOpenToLfsFlags(int posix_flags)
 {
     int lfsFlags = 0;
 
+    //TODO: find more optimized way
     if((posix_flags & O_RDONLY) == O_RDONLY) lfsFlags |= LFS_O_RDONLY;
     if((posix_flags & O_WRONLY) == O_WRONLY) lfsFlags |= LFS_O_WRONLY;
+    if((posix_flags & O_RDWR)   == O_RDWR)   lfsFlags |= LFS_O_RDWR;
     if((posix_flags & O_APPEND) == O_APPEND) lfsFlags |= LFS_O_APPEND;
     if((posix_flags & O_CREAT) == O_CREAT)   lfsFlags |= LFS_O_CREAT;
     if((posix_flags & O_TRUNC) == O_TRUNC)   lfsFlags |= LFS_O_TRUNC;
@@ -336,16 +348,19 @@ int posixOpenToLfsFlags(int posix_flags)
 ssize_t LittleFSFile::write(const void *buf, size_t count)
 {
     LittleFS *lfs_driver = static_cast<LittleFS *>(getParent().get());
-    auto writeSize = lfs_file_write(lfs_driver->getLfs(), file.get(), buf, count);
+    auto result=lfs_file_write(lfs_driver->getLfs(), file.get(), buf, count);
     if(forceSync) lfs_file_sync(lfs_driver->getLfs(), file.get());
-    return writeSize;
+    if(result>=0) return result;
+    return lfsErrorToPosix(result);
 }
 
 ssize_t LittleFSFile::read(void *buf, size_t count)
 {
     // Get the LittleFS driver instance using getParent()
     LittleFS *lfs_driver = static_cast<LittleFS *>(getParent().get());
-    return lfs_file_read(lfs_driver->getLfs(), file.get(), buf, count);
+    auto result=lfs_file_read(lfs_driver->getLfs(), file.get(), buf, count);
+    if(result>=0) return result;
+    return lfsErrorToPosix(result);
 }
 
 off_t LittleFSFile::lseek(off_t pos, int whence)
@@ -369,11 +384,19 @@ off_t LittleFSFile::lseek(off_t pos, int whence)
 
     //TODO: check seek past the end behavior
     LittleFS *lfs_driver = static_cast<LittleFS *>(getParent().get());
-    off_t lfs_off = static_cast<off_t>(
+    off_t result = static_cast<off_t>(
         lfs_file_seek(lfs_driver->getLfs(), file.get(),
                       static_cast<lfs_off_t>(pos), whence_lfs));
+    if(result>=0) return result;
+    return lfsErrorToPosix(result);
+}
 
-    return lfs_off;
+int LittleFSFile::ftruncate(off_t size)
+{
+    LittleFS *lfs_driver = static_cast<LittleFS *>(getParent().get());
+    int err=lfs_file_truncate(lfs_driver->getLfs(),file.get(),
+                                 static_cast<lfs_off_t>(size));
+    return lfsErrorToPosix(err);
 }
 
 int LittleFSFile::fstat(struct stat *pstat) const

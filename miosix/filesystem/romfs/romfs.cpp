@@ -142,6 +142,13 @@ public:
      * completed, or a negative number in case of errors
      */
     virtual off_t lseek(off_t pos, int whence);
+
+    /**
+     * Truncate the file
+     * \param size new file size
+     * \return 0 on success, or a negative number on failure
+     */
+    virtual int ftruncate(off_t size);
     
     /**
      * Return file information.
@@ -172,7 +179,11 @@ ssize_t MemoryMappedRomFsFile::read(void *data, size_t len)
     unsigned int size=fromLittleEndian32(entry->size);
     if(seekPoint>=size) return 0;
     size_t toRead=min<size_t>(len,size-seekPoint);
+    #ifdef __NO_EXCEPTIONS
+    auto parent=static_pointer_cast<MemoryMappedRomFs>(getParent());
+    #else
     auto parent=dynamic_pointer_cast<MemoryMappedRomFs>(getParent());
+    #endif
     memcpy(data,parent->ptr(fromLittleEndian32(entry->inode))+seekPoint,toRead);
     seekPoint+=toRead;
     return toRead;
@@ -199,6 +210,8 @@ off_t MemoryMappedRomFsFile::lseek(off_t pos, int whence)
     return seekPoint;
 }
 
+int MemoryMappedRomFsFile::ftruncate(off_t size) { return -EROFS; }
+
 int MemoryMappedRomFsFile::fstat(struct stat *pstat) const
 {
     fillStatHelper(pstat,entry,getParent()->getFsId());
@@ -207,7 +220,11 @@ int MemoryMappedRomFsFile::fstat(struct stat *pstat) const
 
 MemoryMappedFile MemoryMappedRomFsFile::getFileFromMemory()
 {
+    #ifdef __NO_EXCEPTIONS
+    auto parent=static_pointer_cast<MemoryMappedRomFs>(getParent());
+    #else
     auto parent=dynamic_pointer_cast<MemoryMappedRomFs>(getParent());
+    #endif
     return MemoryMappedFile(parent->ptr(fromLittleEndian32(entry->inode)),
                             fromLittleEndian32(entry->size));
 }
@@ -249,7 +266,11 @@ int MemoryMappedRomFsDirectory::getdents(void *dp, int len)
     char *begin=reinterpret_cast<char*>(dp);
     char *buffer=begin;
     char *end=buffer+len;
+    #ifdef __NO_EXCEPTIONS
+    auto parent=static_pointer_cast<MemoryMappedRomFs>(getParent());
+    #else
     auto parent=dynamic_pointer_cast<MemoryMappedRomFs>(getParent());
+    #endif
     if(!parent) return -EBADF;
 
     unsigned int inode=fromLittleEndian32(entry->inode);
@@ -323,6 +344,7 @@ int MemoryMappedRomFs::lstat(StringPart& name, struct stat *pstat)
     return 0;
 }
 
+int MemoryMappedRomFs::truncate(StringPart& name, off_t size) { return -EROFS; }
 int MemoryMappedRomFs::unlink(StringPart& name) { return -EROFS; }
 int MemoryMappedRomFs::rename(StringPart& oldName, StringPart& newName) { return -EROFS; }
 int MemoryMappedRomFs::mkdir(StringPart& name, int mode) { return -EROFS; }

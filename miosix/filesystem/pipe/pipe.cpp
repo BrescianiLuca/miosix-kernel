@@ -46,7 +46,9 @@ ssize_t Pipe::write(const void *data, size_t len)
     {
         if(unconnected()) return -EPIPE;
         int writable=min<int>(len,capacity-size);
-        if(writable==0) cv.wait(l);
+        //HACK: if the other end of the pipe is closed after we wait on the
+        //condition variable, we'll wait forever. To fix that, we set a timeout
+        if(writable==0) cv.timedWait(l,getTime()+pollTime);
         else {
             for(int i=0;i<writable;i++)
             {
@@ -57,6 +59,7 @@ ssize_t Pipe::write(const void *data, size_t len)
             d+=writable;
             len-=writable;
             written+=writable;
+            cv.broadcast();
         }
     }
     return written;
@@ -69,8 +72,8 @@ ssize_t Pipe::read(void *data, size_t len)
     Lock<FastMutex> l(m);
     for(;;)
     {
-        if(unconnected()) return 0;
         int readable=min<int>(len,size);
+        if(unconnected() && readable==0) return 0;
         //HACK: if the other end of the pipe is closed after we wait on the
         //condition variable, we'll wait forever. To fix that, we set a timeout
         if(readable==0) cv.timedWait(l,getTime()+pollTime);
@@ -81,12 +84,15 @@ ssize_t Pipe::read(void *data, size_t len)
                 if(++get>=capacity) get=0;
             }
             size-=readable;
+            cv.broadcast();
             return readable;
         }
     }
 }
 
 off_t Pipe::lseek(off_t pos, int whence) { return -ESPIPE; }
+
+int Pipe::ftruncate(off_t size) { return -EINVAL; }
 
 int Pipe::fstat(struct stat *pstat) const
 {
@@ -95,7 +101,13 @@ int Pipe::fstat(struct stat *pstat) const
 
 int Pipe::fcntl(int cmd, int opt)
 {
-    return -EFAULT; //TODO
+    switch(cmd)
+    {
+        case F_GETFD:
+        case F_GETFL: //TODO: also return file access mode
+            return O_RDWR;
+    }
+    return -EBADF;
 }
 
 Pipe::~Pipe() { delete[] buffer; }

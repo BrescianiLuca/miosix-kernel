@@ -1,5 +1,5 @@
 /***************************************************************************
- *   Copyright (C) 2018 by Terraneo Federico                               *
+ *   Copyright (C) 2018 - 2024 by Terraneo Federico                        *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -25,12 +25,12 @@
  *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
  ***************************************************************************/
 
-#ifndef MPU_CORTEX_MX_H
-#define MPU_CORTEX_MX_H
+#pragma once
 
 #include "config/miosix_settings.h"
 #include "interfaces/arch_registers.h"
 #include <cstddef>
+#include <utility>
 
 namespace miosix {
 
@@ -47,7 +47,9 @@ unsigned int sizeToMpu(unsigned int size);
  */
 inline void IRQenableMPUatBoot()
 {
+    #if __MPU_PRESENT==1
     MPU->CTRL=MPU_CTRL_PRIVDEFENA_Msk | MPU_CTRL_ENABLE_Msk;
+    #endif //__MPU_PRESENT==1
 }
 
 #ifdef WITH_PROCESSES
@@ -71,8 +73,8 @@ public:
      * \param imageBase base address of the Process RAM image
      * \param imageSize size of the Process RAM image
      */
-    MPUConfiguration(unsigned int *elfBase, unsigned int elfSize,
-            unsigned int *imageBase, unsigned int imageSize);
+    MPUConfiguration(const unsigned int *elfBase, unsigned int elfSize,
+            const unsigned int *imageBase, unsigned int imageSize);
     
     /**
      * \internal
@@ -82,12 +84,14 @@ public:
      */
     void IRQenable()
     {
-       MPU->RBAR=regValues[0];
-       MPU->RASR=regValues[1];
-       MPU->RBAR=regValues[2];
-       MPU->RASR=regValues[3];
-       __set_CONTROL(3); 
-   }
+        #if __MPU_PRESENT==1
+        MPU->RBAR=regValues[0];
+        MPU->RASR=regValues[1];
+        MPU->RBAR=regValues[2];
+        MPU->RASR=regValues[3];
+        __set_CONTROL(3);
+        #endif //__MPU_PRESENT==1
+    }
     
     /**
      * \internal
@@ -97,7 +101,9 @@ public:
      */
     static void IRQdisable()
     {
+        #if __MPU_PRESENT==1
         __set_CONTROL(2);
+        #endif //__MPU_PRESENT==1
     }
     
     /**
@@ -115,6 +121,18 @@ public:
      * greater or equal to the given size
      */
     static unsigned int roundSizeForMPU(unsigned int size);
+
+    /**
+     * Some MPU implementations may not allow regions of arbitrary size,
+     * this function allows to round a memory region up to the minimum value
+     * that the MPU support.
+     * \param ptr pointer to the original memory region
+     * \param size original size of the memory region
+     * \return a pair with a possibly enlarged memory region which contains the
+     * original memory region but is aligned to be used as an MPU region
+     */
+    static std::pair<const unsigned int*, unsigned int>
+    roundRegionForMPU(const unsigned int *ptr, unsigned int size);
 
     /**
      * Check if a buffer is within a readable segment of the process
@@ -148,5 +166,3 @@ private:
 #endif //WITH_PROCESSES
 
 } //namespace miosix
-
-#endif //MPU_CORTEX_MX_H
